@@ -815,6 +815,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
     _controller = [[ColliderAppController alloc] init];
     _controller.engine = &_engine;
     _controller.sharedState = &_sharedState;
+    [_controller startAgentServerIfNeeded];
 
     // Restore saved parameters immediately so the engine has them from start
     [_controller restoreSavedParams];

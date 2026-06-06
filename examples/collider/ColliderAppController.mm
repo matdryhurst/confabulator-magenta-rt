@@ -48,6 +48,7 @@ static const int kConfabulatorAgentPort = 47873;
 
 @interface ColliderAppController (AgentSocket)
 - (void)handleAgentSocketCommand:(NSDictionary*)command;
+- (NSArray<NSDictionary*>*)agentWelcomeMessages;
 @end
 
 static BOOL confabWriteAll(int fd, NSData* data) {
@@ -156,6 +157,15 @@ static BOOL confabWriteAll(int fd, NSData* data) {
                     @"play", @"togglePlay", @"kick", @"loadRecipe"
                 ]
             } toClient:client];
+
+            ColliderAppController* controller = self->_controller;
+            if (controller) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    for (NSDictionary* message in [controller agentWelcomeMessages]) {
+                        [self sendJSONObject:message toClient:client];
+                    }
+                });
+            }
 
             dispatch_async(self->_queue, ^{
                 [self readClient:client];
@@ -444,6 +454,19 @@ static bool confabWriteFloat32Wav(NSString* path,
     return [MagentaSettings readParamFromEngine:self.engine address:address];
 }
 
+- (void)startAgentServerIfNeeded {
+    if (!_agentServer) {
+        _agentServer = [[ConfabulatorAgentServer alloc] initWithController:self];
+        [_agentServer start];
+    }
+    [self sendStateUpdate:@{@"agent": @{
+        @"enabled": @YES,
+        @"protocol": @"confabulator-agent-jsonl",
+        @"host": @"127.0.0.1",
+        @"port": @(kConfabulatorAgentPort)
+    }}];
+}
+
 // ─── View lifecycle ──────────────────────────────────────────────────────────
 
 - (void)loadView {
@@ -520,16 +543,7 @@ static bool confabWriteFloat32Wav(NSString* path,
                                                   userInfo:nil
                                                    repeats:YES];
 
-    if (!_agentServer) {
-        _agentServer = [[ConfabulatorAgentServer alloc] initWithController:self];
-        [_agentServer start];
-    }
-    [self sendStateUpdate:@{@"agent": @{
-        @"enabled": @YES,
-        @"protocol": @"confabulator-agent-jsonl",
-        @"host": @"127.0.0.1",
-        @"port": @(kConfabulatorAgentPort)
-    }}];
+    [self startAgentServerIfNeeded];
 }
 
 - (void)viewDidDisappear {
@@ -540,8 +554,6 @@ static bool confabWriteFloat32Wav(NSString* path,
         [_webView removeFromSuperview];
         _webView = nil;
     }
-    [_agentServer stop];
-    _agentServer = nil;
 }
 
 // ─── Metrics polling (25 Hz) ─────────────────────────────────────────────────
@@ -1000,6 +1012,29 @@ static bool confabWriteFloat32Wav(NSString* path,
         @"timestamp": confabulatorISODateString([NSDate date]),
         @"catalog": value
     }];
+}
+
+- (NSArray<NSDictionary*>*)agentWelcomeMessages {
+    NSMutableArray<NSDictionary*>* messages = [NSMutableArray array];
+    if (_lastAgentCatalog) {
+        [messages addObject:@{
+            @"type": @"catalog",
+            @"schema_version": @1,
+            @"timestamp": confabulatorISODateString([NSDate date]),
+            @"catalog": _lastAgentCatalog
+        }];
+    }
+    if (_lastAgentUiState) {
+        [messages addObject:@{
+            @"type": @"state",
+            @"schema_version": @1,
+            @"timestamp": confabulatorISODateString([NSDate date]),
+            @"audio": @{},
+            @"metrics": @{},
+            @"ui": _lastAgentUiState
+        }];
+    }
+    return messages;
 }
 
 - (void)handleAgentSocketCommand:(NSDictionary*)command {

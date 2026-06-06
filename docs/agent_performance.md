@@ -132,6 +132,54 @@ There is also a simple autonomous test mode:
 python3 scripts/confabulator_agent_client.py --demo
 ```
 
+## Autonomous Performer
+
+For an agent that actually performs while you listen, open CONFABULATOR and run:
+
+```bash
+python3 scripts/confabulator_performer_agent.py
+```
+
+It starts playback, chooses a few embeddings from the current bank catalog,
+moves the listener and prompt nodes, and continuously pushes RVQ/token-warp,
+damage, text-lab, and core settings while reacting to the audio summary coming
+back from the app.
+
+Modes:
+
+```bash
+python3 scripts/confabulator_performer_agent.py --mode xray
+python3 scripts/confabulator_performer_agent.py --mode drift
+python3 scripts/confabulator_performer_agent.py --mode duet
+python3 scripts/confabulator_performer_agent.py --mode noise --intensity 0.8
+```
+
+The default `xray` mode keeps the raw noise overlay near zero and focuses on
+SpectroStream RVQ manipulation. `drift` is smoother, `duet` responds more to
+onsets and loudness, and `noise` is the harshest mode.
+
+Record an agent take:
+
+```bash
+python3 scripts/confabulator_performer_agent.py --mode xray --record
+```
+
+Run a fixed-length take:
+
+```bash
+python3 scripts/confabulator_performer_agent.py --mode duet --take 120 --record
+```
+
+Useful options:
+
+```text
+--intensity 0.0-1.0       How hard the agent pushes the instrument.
+--embedding-every 45      Seconds between embedding changes.
+--no-start                Do not send play/kick when connecting.
+--allow-drums             Allow percussion/drum embeddings.
+--seed 123                Repeat the same broad gesture choices.
+```
+
 ## Recording Agent Performances
 
 When an agent records or captures audio, the `.confab.json` recipe sidecar

@@ -203,6 +203,7 @@ struct ColliderSharedState {
 - (void)notifyModelLoaded:(NSString*)modelName;
 - (void)sendStateUpdate:(NSDictionary*)state;
 - (void)restoreSavedParams;
+- (void)startAgentServerIfNeeded;
 - (void)handleLoadModel;
 - (void)showReactSettings;
 - (void)sendPlayState:(BOOL)playing;
