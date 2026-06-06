@@ -26,8 +26,10 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <errno.h>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -40,6 +42,224 @@ using magentart::core::kMusicCoCaEmbeddingDim;
 // ─── TEMP Dev server probe ────────────────────────────────────────────────────────
 
 static const int kDevServerPort = 62419;
+static const int kConfabulatorAgentPort = 47873;
+
+@class ColliderAppController;
+
+@interface ColliderAppController (AgentSocket)
+- (void)handleAgentSocketCommand:(NSDictionary*)command;
+@end
+
+static BOOL confabWriteAll(int fd, NSData* data) {
+    const uint8_t* bytes = static_cast<const uint8_t*>(data.bytes);
+    NSUInteger remaining = data.length;
+    while (remaining > 0) {
+        ssize_t written = write(fd, bytes, remaining);
+        if (written < 0) {
+            if (errno == EINTR) continue;
+            return NO;
+        }
+        if (written == 0) return NO;
+        bytes += written;
+        remaining -= static_cast<NSUInteger>(written);
+    }
+    return YES;
+}
+
+@interface ConfabulatorAgentServer : NSObject
+- (instancetype)initWithController:(ColliderAppController*)controller;
+- (void)start;
+- (void)stop;
+- (void)broadcastJSONObject:(NSDictionary*)object;
+@end
+
+@implementation ConfabulatorAgentServer {
+    __weak ColliderAppController* _controller;
+    dispatch_queue_t _queue;
+    NSMutableSet<NSNumber*>* _clients;
+    int _serverSocket;
+    std::atomic<bool> _running;
+}
+
+- (instancetype)initWithController:(ColliderAppController*)controller {
+    self = [super init];
+    if (self) {
+        _controller = controller;
+        _queue = dispatch_queue_create("confabulator.agent.socket", DISPATCH_QUEUE_CONCURRENT);
+        _clients = [NSMutableSet set];
+        _serverSocket = -1;
+        _running.store(false, std::memory_order_relaxed);
+    }
+    return self;
+}
+
+- (void)start {
+    if (_running.exchange(true, std::memory_order_acq_rel)) return;
+
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        _running.store(false, std::memory_order_release);
+        NSLog(@"CONFABULATOR Agent: socket() failed: %s", strerror(errno));
+        return;
+    }
+
+    int reuse = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    struct sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(kConfabulatorAgentPort);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    if (bind(sock, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0 ||
+        listen(sock, 8) != 0) {
+        NSLog(@"CONFABULATOR Agent: could not listen on 127.0.0.1:%d (%s)",
+              kConfabulatorAgentPort, strerror(errno));
+        close(sock);
+        _running.store(false, std::memory_order_release);
+        return;
+    }
+
+    _serverSocket = sock;
+    NSLog(@"CONFABULATOR Agent: listening on 127.0.0.1:%d", kConfabulatorAgentPort);
+
+    dispatch_async(_queue, ^{
+        while (self->_running.load(std::memory_order_acquire)) {
+            struct sockaddr_in clientAddr = {};
+            socklen_t clientLen = sizeof(clientAddr);
+            int client = accept(self->_serverSocket,
+                                reinterpret_cast<struct sockaddr*>(&clientAddr),
+                                &clientLen);
+            if (client < 0) {
+                if (errno == EINTR) continue;
+                if (self->_running.load(std::memory_order_acquire)) {
+                    NSLog(@"CONFABULATOR Agent: accept() failed: %s", strerror(errno));
+                }
+                break;
+            }
+
+            @synchronized (self) {
+                [self->_clients addObject:@(client)];
+            }
+
+            [self sendJSONObject:@{
+                @"type": @"hello",
+                @"schema_version": @1,
+                @"protocol": @"confabulator-agent-jsonl",
+                @"port": @(kConfabulatorAgentPort),
+                @"commands": @[
+                    @"setParam", @"setCore", @"setFx", @"setDamage", @"setRvq",
+                    @"setPerformance", @"setTextLab", @"movePrompt", @"moveListener",
+                    @"setPromptText", @"selectPrompt", @"selectEmbedding", @"setEmbeddings",
+                    @"randomCore", @"randomDamage", @"jolt", @"clean", @"macro",
+                    @"recordStart", @"recordStop", @"captureLast", @"setRecordingWindow",
+                    @"play", @"togglePlay", @"kick", @"loadRecipe"
+                ]
+            } toClient:client];
+
+            dispatch_async(self->_queue, ^{
+                [self readClient:client];
+            });
+        }
+    });
+}
+
+- (void)stop {
+    if (!_running.exchange(false, std::memory_order_acq_rel)) return;
+    if (_serverSocket >= 0) {
+        close(_serverSocket);
+        _serverSocket = -1;
+    }
+    @synchronized (self) {
+        for (NSNumber* clientNumber in _clients) {
+            close(clientNumber.intValue);
+        }
+        [_clients removeAllObjects];
+    }
+}
+
+- (void)dealloc {
+    [self stop];
+}
+
+- (void)sendJSONObject:(NSDictionary*)object toClient:(int)client {
+    if (!object) return;
+    NSError* error = nil;
+    NSData* json = [NSJSONSerialization dataWithJSONObject:object options:0 error:&error];
+    if (!json || error) return;
+    NSMutableData* line = [NSMutableData dataWithData:json];
+    const char newline = '\n';
+    [line appendBytes:&newline length:1];
+    if (!confabWriteAll(client, line)) {
+        close(client);
+        @synchronized (self) {
+            [_clients removeObject:@(client)];
+        }
+    }
+}
+
+- (void)broadcastJSONObject:(NSDictionary*)object {
+    if (!object || !_running.load(std::memory_order_acquire)) return;
+    dispatch_async(_queue, ^{
+        NSArray<NSNumber*>* clients = nil;
+        @synchronized (self) {
+            clients = [self->_clients allObjects];
+        }
+        for (NSNumber* clientNumber in clients) {
+            [self sendJSONObject:object toClient:clientNumber.intValue];
+        }
+    });
+}
+
+- (void)readClient:(int)client {
+    NSMutableData* pending = [NSMutableData data];
+    uint8_t chunk[4096];
+
+    while (_running.load(std::memory_order_acquire)) {
+        ssize_t count = read(client, chunk, sizeof(chunk));
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (count == 0) break;
+
+        [pending appendBytes:chunk length:static_cast<NSUInteger>(count)];
+        while (pending.length > 0) {
+            const char* bytes = static_cast<const char*>(pending.bytes);
+            const void* found = memchr(bytes, '\n', pending.length);
+            if (!found) break;
+
+            NSUInteger lineLength = static_cast<const char*>(found) - bytes;
+            NSData* line = [NSData dataWithBytes:bytes length:lineLength];
+            NSData* remainder = [pending subdataWithRange:NSMakeRange(lineLength + 1, pending.length - lineLength - 1)];
+            [pending setData:remainder];
+
+            if (line.length == 0) continue;
+            NSError* error = nil;
+            id object = [NSJSONSerialization JSONObjectWithData:line options:0 error:&error];
+            if (!error && [object isKindOfClass:[NSDictionary class]]) {
+                ColliderAppController* controller = self->_controller;
+                if (controller) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [controller handleAgentSocketCommand:(NSDictionary*)object];
+                    });
+                }
+            } else {
+                [self sendJSONObject:@{
+                    @"type": @"error",
+                    @"message": error.localizedDescription ?: @"Invalid JSON command."
+                } toClient:client];
+            }
+        }
+    }
+
+    close(client);
+    @synchronized (self) {
+        [_clients removeObject:@(client)];
+    }
+}
+
+@end
 
 static BOOL isDevServerRunning(void) {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -187,6 +407,11 @@ static bool confabWriteFloat32Wav(NSString* path,
 - (void)handleRecorderCaptureLast:(NSDictionary*)body;
 - (void)handleRecorderStart:(NSDictionary*)body;
 - (void)handleRecorderStop:(NSDictionary*)body;
+- (void)handleAgentState:(NSDictionary*)body;
+- (void)handleAgentCatalog:(NSDictionary*)body;
+- (NSDictionary*)currentAudioFeatureState;
+- (void)publishAgentPerformanceStateWithAudio:(NSDictionary*)audioFeatures
+                                      metrics:(NSDictionary*)metrics;
 @end
 
 @implementation ColliderAppController {
@@ -194,6 +419,11 @@ static bool confabWriteFloat32Wav(NSString* path,
     NSTimer* _metricsTimer;
     NSMutableDictionary* _lastParams;
     int _metricsTicks;
+    ConfabulatorAgentServer* _agentServer;
+    NSDictionary* _lastAgentUiState;
+    NSDictionary* _lastAgentCatalog;
+    float _agentLastRms;
+    float _agentLastBrightness;
 
     NSString* _modelName;
     NSString* _currentPromptText;
@@ -289,6 +519,17 @@ static bool confabWriteFloat32Wav(NSString* path,
                                                   selector:@selector(updateMetrics)
                                                   userInfo:nil
                                                    repeats:YES];
+
+    if (!_agentServer) {
+        _agentServer = [[ConfabulatorAgentServer alloc] initWithController:self];
+        [_agentServer start];
+    }
+    [self sendStateUpdate:@{@"agent": @{
+        @"enabled": @YES,
+        @"protocol": @"confabulator-agent-jsonl",
+        @"host": @"127.0.0.1",
+        @"port": @(kConfabulatorAgentPort)
+    }}];
 }
 
 - (void)viewDidDisappear {
@@ -299,6 +540,8 @@ static bool confabWriteFloat32Wav(NSString* path,
         [_webView removeFromSuperview];
         _webView = nil;
     }
+    [_agentServer stop];
+    _agentServer = nil;
 }
 
 // ─── Metrics polling (25 Hz) ─────────────────────────────────────────────────
@@ -322,17 +565,14 @@ static bool confabWriteFloat32Wav(NSString* path,
         stateUpdate[@"activeNotes"] = notes;
     }
 
+    NSDictionary* audioFeatures = nil;
+    NSDictionary* metricsState = nil;
+
     // Send audio level every frame (single scalar — negligible bridge cost)
     if (shared) {
-        int head = shared->vizHead.load(std::memory_order_acquire);
-        static constexpr int WINDOW = 2048; // ~42ms at 48kHz
-        float peak = 0;
-        for (int i = 0; i < WINDOW; i++) {
-            int idx = (head - WINDOW + i + ColliderSharedState::VIZ_BUF_SIZE) % ColliderSharedState::VIZ_BUF_SIZE;
-            float v = fabsf(shared->vizRing[idx]);
-            if (v > peak) peak = v;
-        }
-        stateUpdate[@"audioLevel"] = @(peak);
+        audioFeatures = [self currentAudioFeatureState];
+        stateUpdate[@"audioLevel"] = audioFeatures[@"peak"] ?: @0;
+        stateUpdate[@"audioFeatures"] = audioFeatures;
     }
 
     // Metrics every 5th tick (~5 Hz)
@@ -340,12 +580,13 @@ static bool confabWriteFloat32Wav(NSString* path,
         _metricsTicks = 0;
         EngineMetrics m = engine->get_metrics();
 
-        stateUpdate[@"metrics"] = @{
+        metricsState = @{
             @"frameMs": @(m.transformer_ms),
             @"bufferAvail": @(m.buffer_available),
             @"bufferCap": @(m.buffer_capacity),
             @"droppedFrames": @(m.dropped_frames)
         };
+        stateUpdate[@"metrics"] = metricsState;
         if (shared) {
             stateUpdate[@"recorder"] = [self currentRecorderStateWithStatus:nil
                                                                     filePath:nil
@@ -371,6 +612,9 @@ static bool confabWriteFloat32Wav(NSString* path,
     if (params.count > 0) stateUpdate[@"params"] = params;
 
     if (stateUpdate.count > 0) [self sendStateUpdate:stateUpdate];
+    if (audioFeatures && metricsState) {
+        [self publishAgentPerformanceStateWithAudio:audioFeatures metrics:metricsState];
+    }
 }
 
 // ─── State push to React ─────────────────────────────────────────────────────
@@ -417,6 +661,83 @@ static bool confabWriteFloat32Wav(NSString* path,
         @"rvqJitter": @(shared->rvqJitter.load(std::memory_order_relaxed)),
         @"rvqStride": @(shared->rvqStride.load(std::memory_order_relaxed)),
     };
+}
+
+- (NSDictionary*)currentAudioFeatureState {
+    ColliderSharedState* shared = self.sharedState;
+    if (!shared) return @{};
+
+    int head = shared->vizHead.load(std::memory_order_acquire);
+    static constexpr int WINDOW = 4096; // ~85 ms at 48 kHz
+    double sumSquares = 0.0;
+    double diffSquares = 0.0;
+    double lowSquares = 0.0;
+    double highSquares = 0.0;
+    float peak = 0.0f;
+    float previous = 0.0f;
+    int zeroCrossings = 0;
+
+    for (int i = 0; i < WINDOW; i++) {
+        int idx = (head - WINDOW + i + ColliderSharedState::VIZ_BUF_SIZE) % ColliderSharedState::VIZ_BUF_SIZE;
+        float sample = shared->vizRing[idx];
+        float absSample = fabsf(sample);
+        peak = fmaxf(peak, absSample);
+        sumSquares += sample * sample;
+        if (i > 0) {
+            float diff = sample - previous;
+            diffSquares += diff * diff;
+            highSquares += diff * diff;
+            if ((sample >= 0.0f && previous < 0.0f) || (sample < 0.0f && previous >= 0.0f)) {
+                zeroCrossings++;
+            }
+        }
+        float low = previous * 0.92f + sample * 0.08f;
+        lowSquares += low * low;
+        previous = sample;
+    }
+
+    double rms = sqrt(sumSquares / WINDOW);
+    double diffRms = sqrt(diffSquares / fmax(1, WINDOW - 1));
+    double lowRms = sqrt(lowSquares / WINDOW);
+    double highRms = sqrt(highSquares / fmax(1, WINDOW - 1));
+    double brightness = fmin(1.0, diffRms / fmax(1e-6, rms * 2.25));
+    double roughness = fmin(1.0, highRms / fmax(1e-6, lowRms + highRms));
+    double zcr = zeroCrossings / (double)WINDOW;
+    double loudnessDb = 20.0 * log10(fmax(1e-6, rms));
+    double onset = fmax(0.0, (rms - _agentLastRms) * 8.0 + (brightness - _agentLastBrightness) * 0.65);
+    onset = fmin(1.0, onset);
+    _agentLastRms = static_cast<float>(rms);
+    _agentLastBrightness = static_cast<float>(brightness);
+
+    return @{
+        @"peak": @(peak),
+        @"rms": @(rms),
+        @"loudnessDb": @(loudnessDb),
+        @"brightness": @(brightness),
+        @"roughness": @(roughness),
+        @"zeroCrossingRate": @(zcr),
+        @"onset": @(onset),
+        @"windowMs": @(WINDOW * 1000.0 / ColliderSharedState::kSampleRate)
+    };
+}
+
+- (void)publishAgentPerformanceStateWithAudio:(NSDictionary*)audioFeatures
+                                      metrics:(NSDictionary*)metrics {
+    if (!_agentServer) return;
+
+    NSMutableDictionary* payload = [NSMutableDictionary dictionary];
+    payload[@"type"] = @"state";
+    payload[@"schema_version"] = @1;
+    payload[@"timestamp"] = confabulatorISODateString([NSDate date]);
+    payload[@"transport"] = @{
+        @"playing": @(_isPlaying),
+        @"modelName": _modelName ?: @"No model loaded"
+    };
+    payload[@"audio"] = audioFeatures ?: @{};
+    payload[@"metrics"] = metrics ?: @{};
+    if (_lastAgentUiState) payload[@"ui"] = _lastAgentUiState;
+    if (_lastAgentCatalog) payload[@"catalogVersion"] = _lastAgentCatalog[@"version"] ?: @1;
+    [_agentServer broadcastJSONObject:payload];
 }
 
 - (void)applyFxKey:(NSString*)key value:(float)value {
@@ -663,6 +984,39 @@ static bool confabWriteFloat32Wav(NSString* path,
                                                                         error:error]}];
 }
 
+- (void)handleAgentState:(NSDictionary*)body {
+    NSDictionary* value = [body[@"value"] isKindOfClass:[NSDictionary class]] ? body[@"value"] : nil;
+    if (!value) return;
+    _lastAgentUiState = value;
+}
+
+- (void)handleAgentCatalog:(NSDictionary*)body {
+    NSDictionary* value = [body[@"value"] isKindOfClass:[NSDictionary class]] ? body[@"value"] : nil;
+    if (!value) return;
+    _lastAgentCatalog = value;
+    [_agentServer broadcastJSONObject:@{
+        @"type": @"catalog",
+        @"schema_version": @1,
+        @"timestamp": confabulatorISODateString([NSDate date]),
+        @"catalog": value
+    }];
+}
+
+- (void)handleAgentSocketCommand:(NSDictionary*)command {
+    if (!command) return;
+    NSString* commandId = [command[@"id"] isKindOfClass:[NSString class]] ? command[@"id"] : nil;
+    NSMutableDictionary* ack = [NSMutableDictionary dictionary];
+    ack[@"type"] = @"ack";
+    ack[@"schema_version"] = @1;
+    ack[@"timestamp"] = confabulatorISODateString([NSDate date]);
+    ack[@"ok"] = @YES;
+    if (commandId) ack[@"id"] = commandId;
+    if ([command[@"type"] isKindOfClass:[NSString class]]) ack[@"command"] = command[@"type"];
+    [_agentServer broadcastJSONObject:ack];
+
+    [self sendStateUpdate:@{@"agentCommand": command}];
+}
+
 - (void)showReactSettings {
     [self sendStateUpdate:@{@"openSettings": @YES}];
 }
@@ -819,6 +1173,12 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
     }
     else if ([type isEqualToString:@"recorderStop"]) {
         [self handleRecorderStop:body];
+    }
+    else if ([type isEqualToString:@"agentState"]) {
+        [self handleAgentState:body];
+    }
+    else if ([type isEqualToString:@"agentCatalog"]) {
+        [self handleAgentCatalog:body];
     }
     else if ([type isEqualToString:@"textPrompts"]) {
         NSArray* promptsArray = body[@"value"];
@@ -1483,6 +1843,7 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
 
 - (void)dealloc {
     [_metricsTimer invalidate];
+    [_agentServer stop];
 }
 
 @end

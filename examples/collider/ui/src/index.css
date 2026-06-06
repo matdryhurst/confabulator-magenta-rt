@@ -101,6 +101,48 @@ input, textarea {
   letter-spacing: 0;
 }
 
+.confabulator-agent-badge {
+  position: fixed;
+  top: calc(var(--app-padding) + 62px);
+  left: 50%;
+  z-index: 9;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transform: translateX(-50%);
+  min-height: 24px;
+  padding: 3px 8px;
+  box-sizing: border-box;
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  background: #000;
+  color: rgba(255, 255, 255, 0.68);
+  font-family: Impact, Haettenschweiler, 'Arial Black', sans-serif;
+  font-size: 11px;
+  line-height: 1;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+.confabulator-agent-badge.is-live {
+  border-color: #fff;
+  color: #fff;
+  box-shadow: 3px 3px 0 #e10600;
+}
+
+.confabulator-agent-badge span {
+  color: #e10600;
+}
+
+.confabulator-agent-badge em {
+  max-width: 120px;
+  overflow: hidden;
+  color: #fff;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .confabulator-rack {
   position: relative;
   z-index: 8;

@@ -224,6 +224,22 @@ These buttons move several parts of the instrument at once.
 
 They are performance states. Press one, then keep playing the surface and dials.
 
+## AI Agent Performance
+
+CONFABULATOR can be controlled by a local AI agent.
+
+When the app is open, it starts a localhost performance socket at
+`127.0.0.1:47873`. An agent can read compact audio features, current prompt
+positions, selected embeddings, RVQ controls, damage controls, and recorder
+state. It can then send commands back to move the listener, choose embeddings,
+turn dials, hit macros, randomize sections, and start or stop recording.
+
+This is meant for AI performance, not remote control over the internet. The
+socket only listens on your own machine.
+
+See [docs/agent_performance.md](docs/agent_performance.md) for commands and the
+quick Python client.
+
 ## SETTINGS BANK
 
 The settings bank saves a snapshot of the instrument.

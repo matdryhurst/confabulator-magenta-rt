@@ -40,3 +40,12 @@ open "$HOME/Applications/CONFABULATOR.app"
 5. Use `CREATE EMBED` to turn an audio file into a playable embedding in the
    `VARIOUS` folder.
 6. Use the manipulation rack to bend, damage, or randomize the stream.
+
+## Agent Performance
+
+CONFABULATOR can expose a localhost JSON-lines socket for AI performers at
+`127.0.0.1:47873`. Agents receive compact audio features and structured
+instrument state, then send commands back to move prompts, choose embeddings,
+turn RVQ/damage controls, trigger macros, and control the recorder.
+
+See [Agent Performance Socket](../agent_performance.md).

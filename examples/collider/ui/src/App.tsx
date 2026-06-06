@@ -90,6 +90,11 @@ const PARAM_STATE_KEYS: Partial<Record<number, keyof ParamsState>> = {
   38: 'pca_coeff_5',
 };
 
+const PARAM_KEY_TO_ADDRESS = Object.entries(PARAM_STATE_KEYS).reduce((map, [address, key]) => {
+  if (key) map[key] = Number(address);
+  return map;
+}, {} as Partial<Record<keyof ParamsState, number>>);
+
 const PCA_PARAM_ADDRESSES = [33, 34, 35, 36, 37, 38] as const;
 
 type FxState = {
@@ -203,6 +208,21 @@ type PromptPayload = {
   weight: number;
   kind: 'text' | 'audio' | 'bank';
   embedding?: number[];
+};
+
+type AgentStatus = {
+  enabled?: boolean;
+  protocol?: string;
+  host?: string;
+  port?: number;
+  lastCommand?: string;
+};
+
+type AgentEvent = {
+  at: string;
+  t: number;
+  direction: 'in' | 'out';
+  payload: unknown;
 };
 
 const DEFAULT_FX_STATE: FxState = {
@@ -697,6 +717,8 @@ function App() {
   const [fxState, setFxState] = useState<FxState>(DEFAULT_FX_STATE);
   const [rvqPedals, setRvqPedals] = useState<RvqPedalState>(createDefaultRvqPedals);
   const [recorderState, setRecorderState] = useState<RecorderState>(DEFAULT_RECORDER_STATE);
+  const [agentStatus, setAgentStatus] = useState<AgentStatus>({});
+  const [agentCommand, setAgentCommand] = useState<any>(null);
   const [performanceState, setPerformanceState] = useState<PerformanceState>(DEFAULT_PERFORMANCE_STATE);
   const [textLabState, setTextLabState] = useState<TextLabState>(DEFAULT_TEXT_LAB_STATE);
   const [textLabStatus, setTextLabStatus] = useState<TextLabStatus>('RAW');
@@ -1024,6 +1046,17 @@ function App() {
   const pendingSourceEmbeddingRef = useRef<{ nodeId: number; slot: number; attempts: number; name: string; bankId: string } | null>(null);
   const rvqPedalBaseRef = useRef<RvqValues | null>(null);
   const recipeInputRef = useRef<HTMLInputElement>(null);
+  const agentEventsRef = useRef<AgentEvent[]>([]);
+
+  const appendAgentEvent = useCallback((direction: AgentEvent['direction'], payload: unknown) => {
+    const event: AgentEvent = {
+      at: new Date().toISOString(),
+      t: Math.round(window.performance.now()) / 1000,
+      direction,
+      payload,
+    };
+    agentEventsRef.current = [...agentEventsRef.current, event].slice(-2000);
+  }, []);
 
   // ─── Bridge: send prompts + weights to native ──────────────────────
 
@@ -1155,6 +1188,19 @@ function App() {
       }
       if (state.recorder !== undefined) {
         setRecorderState(previous => ({ ...previous, ...state.recorder }));
+      }
+      if (state.agent !== undefined) {
+        setAgentStatus(previous => ({ ...previous, ...state.agent }));
+      }
+      if (state.agentCommand !== undefined) {
+        setAgentStatus(previous => ({
+          ...previous,
+          lastCommand: typeof state.agentCommand.type === 'string' ? state.agentCommand.type : 'command',
+        }));
+        setAgentCommand({
+          ...state.agentCommand,
+          __receivedAt: Date.now(),
+        });
       }
       if (state.params !== undefined) {
         setParamsState(p => {
@@ -1982,8 +2028,15 @@ function App() {
       damage,
       performance: { ...performanceState },
       recorder: { ...recorderState },
+      agent_performance: {
+        schema_version: 1,
+        status: { ...agentStatus },
+        event_count: agentEventsRef.current.length,
+        events: agentEventsRef.current,
+      },
     };
   }, [
+    agentStatus,
     activeBankItems,
     bankLabel,
     bankSets,
@@ -2213,6 +2266,320 @@ function App() {
     reader.readAsText(file);
   }, [applyRecipePatch]);
 
+  const buildAgentSnapshot = useCallback(() => {
+    const currentPrompts = promptsRef.current;
+    const weights = calculateWeights(listenerRef.current, currentPrompts);
+    return {
+      schema_version: 1,
+      timestamp: new Date().toISOString(),
+      modelName,
+      isPlaying,
+      params: { ...paramsState },
+      damage: {
+        wet: fxState.wet,
+        drive: fxState.drive,
+        fold: fxState.fold,
+        crush: fxState.crush,
+        ring: fxState.ring,
+        comb: fxState.comb,
+        body: fxState.body,
+        smear: fxState.smear,
+        stutter: fxState.stutter,
+        pitch: fxState.pitch,
+        harmonics: fxState.harmonics,
+        noise: fxState.noise,
+      },
+      rvq: {
+        values: readRvqValues(),
+        pedals: cloneRvqPedals(rvqPedals),
+      },
+      performance: { ...performanceState },
+      text_encoder: {
+        status: textLabStatusLabel,
+        ...textLabState,
+      },
+      recorder: { ...recorderState },
+      prompt_surface: {
+        listener: { ...listenerRef.current },
+        selectedBallId,
+        sliderPos,
+        physicsSpeed,
+        collisionsEnabled,
+        prompts: currentPrompts.map((prompt, index) => ({
+          id: prompt.id,
+          label: prompt.label,
+          x: prompt.x,
+          y: prompt.y,
+          weight: weights[index] ?? 0,
+          colorIndex: prompt.colorIndex,
+          kind: prompt.isAudio ? 'audio' : (prompt.bankEmbedding ? 'embedding' : (prompt.textEmbedding ? 'text-vector' : 'text')),
+          isBank: !!prompt.isBank,
+          bankId: prompt.bankId,
+        })),
+      },
+      embeddings: {
+        selectedBankSetId,
+        selectedBankSetLabel: activeBank?.label,
+        selectedBankId,
+        selectedBankLabel: selectedBankItem ? bankLabel(selectedBankItem) : undefined,
+        activeBankItemCount: activeBankItems.length,
+      },
+      agent: { ...agentStatus },
+    };
+  }, [
+    activeBank,
+    activeBankItems.length,
+    agentStatus,
+    bankLabel,
+    collisionsEnabled,
+    fxState,
+    isPlaying,
+    modelName,
+    paramsState,
+    performanceState,
+    physicsSpeed,
+    recorderState,
+    rvqPedals,
+    selectedBallId,
+    selectedBankId,
+    selectedBankItem,
+    selectedBankSetId,
+    sliderPos,
+    textLabState,
+    textLabStatusLabel,
+  ]);
+
+  useEffect(() => {
+    const publish = () => {
+      post({ type: 'agentState', value: toMessageSafeObject(buildAgentSnapshot()) });
+    };
+    publish();
+    const timer = window.setInterval(publish, 250);
+    return () => window.clearInterval(timer);
+  }, [buildAgentSnapshot]);
+
+  useEffect(() => {
+    post({
+      type: 'agentCatalog',
+      value: toMessageSafeObject({
+        schema_version: 1,
+        version: Date.now(),
+        protocol: 'confabulator-agent-jsonl',
+        commands: {
+          core: Object.entries(PARAM_KEY_TO_ADDRESS).map(([key, address]) => ({ key, address })),
+          damage: ['wet', 'drive', 'fold', 'crush', 'ring', 'comb', 'body', 'smear', 'stutter', 'pitch', 'harmonics', 'noise'],
+          rvq: [...RVQ_KEYS],
+          text_encoder: ['warp', 'scramble', 'morph', 'oppose', 'scan', 'gravity'],
+          performance: ['drift', 'snapback'],
+          macros: ['metal', 'melt', 'shred', 'ghost'],
+          recorder: ['recordStart', 'recordStop', 'captureLast', 'setRecordingWindow'],
+        },
+        embeddings: {
+          banks: bankSets.map((bank) => ({
+            id: bank.id,
+            label: bank.label,
+            count: bank.items.length,
+            items: bank.items.map((item) => ({
+              id: item.id,
+              label: bankLabel(item),
+              bank: item.bank ?? bank.id,
+              features: item.features,
+              root: item.root,
+              brightness: item.brightness,
+              density: item.density,
+              rhythm: item.rhythm,
+              styleTokens: item.styleTokens,
+            })),
+          })),
+        },
+      }),
+    });
+  }, [bankLabel, bankSets]);
+
+  const executeAgentCommand = useCallback((command: any) => {
+    if (!command || typeof command !== 'object') return;
+    const commandType = typeof command.type === 'string' ? command.type : '';
+    appendAgentEvent('in', command);
+    const clamp = (value: unknown, min = 0, max = 1) => {
+      const number = Number(value);
+      if (!Number.isFinite(number)) return undefined;
+      return Math.max(min, Math.min(max, number));
+    };
+    const promptIdFrom = (value: unknown) => {
+      const number = Number(value);
+      return Number.isFinite(number) ? number : undefined;
+    };
+    const selectedOrFirstPromptId = () => selectedBallId ?? promptsRef.current[0]?.id;
+    const findEmbedding = () => {
+      const wantedId = String(command.bankId ?? command.embeddingId ?? command.itemId ?? '');
+      const wantedLabel = typeof command.label === 'string' ? command.label.trim().toLowerCase() : '';
+      return allBankItems.find((item) => item.id === wantedId)
+        ?? (wantedLabel ? allBankItems.find((item) => bankLabel(item).toLowerCase() === wantedLabel || item.label.toLowerCase() === wantedLabel) : undefined)
+        ?? (typeof command.bankSetId === 'string'
+          ? bankSets.find((bank) => bank.id === command.bankSetId)?.items[Math.max(0, Number(command.index ?? 0))] : undefined);
+    };
+
+    if (commandType === 'setParam') {
+      const address = typeof command.address === 'number'
+        ? command.address
+        : PARAM_KEY_TO_ADDRESS[command.key as keyof ParamsState];
+      const value = Number(command.value);
+      if (typeof address === 'number' && Number.isFinite(value)) sendParamChange(address, value);
+    } else if (commandType === 'setCore') {
+      const values = command.values && typeof command.values === 'object' ? command.values : command;
+      (Object.entries(PARAM_KEY_TO_ADDRESS) as [keyof ParamsState, number][]).forEach(([key, address]) => {
+        if (values[key] !== undefined) {
+          const value = key === 'drumless' ? (values[key] ? 1 : 0) : Number(values[key]);
+          if (Number.isFinite(value)) sendParamChange(address, value);
+        }
+      });
+    } else if (commandType === 'setFx' || commandType === 'setDamage') {
+      const values = command.values && typeof command.values === 'object' ? command.values : { [command.key]: command.value };
+      (Object.keys(DEFAULT_FX_STATE) as (keyof FxState)[]).forEach((key) => {
+        if (!key.startsWith('rvq') && values[key] !== undefined) {
+          const value = clamp(values[key]);
+          if (value !== undefined) sendFxChange(key, value);
+        }
+      });
+    } else if (commandType === 'setRvq') {
+      const values = command.values && typeof command.values === 'object' ? command.values : { [command.key]: command.value };
+      RVQ_KEYS.forEach((key) => {
+        if (values[key] !== undefined) {
+          const value = clamp(values[key]);
+          if (value !== undefined) handleRvqManualChange(key, value);
+        }
+      });
+    } else if (commandType === 'setPerformance') {
+      (['drift', 'snapback'] as (keyof PerformanceState)[]).forEach((key) => {
+        if (command[key] !== undefined || command.values?.[key] !== undefined) {
+          const value = clamp(command.values?.[key] ?? command[key]);
+          if (value !== undefined) setPerformanceKey(key, value);
+        }
+      });
+    } else if (commandType === 'setTextLab') {
+      (['warp', 'scramble', 'morph', 'oppose', 'scan', 'gravity'] as (keyof TextLabState)[]).forEach((key) => {
+        if (command[key] !== undefined || command.values?.[key] !== undefined) {
+          const value = clamp(command.values?.[key] ?? command[key]);
+          if (value !== undefined) setTextLabKey(key, value);
+        }
+      });
+    } else if (commandType === 'moveListener') {
+      const x = Number(command.x);
+      const y = Number(command.y);
+      if (Number.isFinite(x) && Number.isFinite(y)) setListener({ x, y });
+    } else if (commandType === 'movePrompt') {
+      const id = promptIdFrom(command.promptId ?? command.id) ?? selectedOrFirstPromptId();
+      const x = Number(command.x);
+      const y = Number(command.y);
+      if (id !== undefined && Number.isFinite(x) && Number.isFinite(y)) {
+        setPrompts(prev => prev.map(prompt => prompt.id === id ? { ...prompt, x, y } : prompt));
+      }
+    } else if (commandType === 'setPromptText') {
+      const id = promptIdFrom(command.promptId ?? command.id) ?? selectedOrFirstPromptId();
+      if (id !== undefined && typeof command.text === 'string') {
+        handleTextChange(id, command.text);
+      }
+    } else if (commandType === 'selectPrompt') {
+      const id = promptIdFrom(command.promptId ?? command.id);
+      if (id !== undefined) setSelectedBallId(id);
+    } else if (commandType === 'selectEmbedding') {
+      const item = findEmbedding();
+      if (item) {
+        if (command.add) {
+          addBankPrompt(item);
+        } else {
+          const id = promptIdFrom(command.promptId ?? command.id) ?? selectedOrFirstPromptId();
+          if (id !== undefined) {
+            const existing = promptsRef.current.find((prompt) => prompt.id === id);
+            if (existing?.isAudio) post({ type: 'clearAudioPrompt' });
+            setPrompts(prev => prev.map(prompt => prompt.id === id ? { ...prompt, ...bankPromptPatch(item) } : prompt));
+            setSelectedBallId(id);
+          } else {
+            addBankPrompt(item);
+          }
+        }
+        setBankControlsToItem(item);
+      }
+    } else if (commandType === 'setEmbeddings' && Array.isArray(command.items)) {
+      const items = command.items
+        .map((entry: any) => allBankItems.find((item) => item.id === entry || item.id === entry?.id || item.id === entry?.bankId))
+        .filter(Boolean) as ConfabulatorBankItem[];
+      if (items.length > 0) {
+        setPrompts(prev => prev.map((prompt, index) => items[index] ? { ...prompt, ...bankPromptPatch(items[index]) } : prompt));
+        setBankControlsToItem(items[0]);
+        setSelectedBallId(promptsRef.current[0]?.id ?? null);
+      }
+    } else if (commandType === 'randomCore') {
+      randomizeConfabulator();
+    } else if (commandType === 'randomDamage') {
+      randomizeDamage();
+    } else if (commandType === 'jolt') {
+      joltConfabulator();
+    } else if (commandType === 'clean') {
+      cleanConfabulator();
+    } else if (commandType === 'macro') {
+      const name = command.name;
+      if (name === 'metal' || name === 'melt' || name === 'shred' || name === 'ghost') {
+        applyMacro(name);
+      }
+    } else if (commandType === 'recordStart') {
+      if (!recorderState.recording) toggleRetroRecorder();
+    } else if (commandType === 'recordStop') {
+      if (recorderState.recording) toggleRetroRecorder();
+    } else if (commandType === 'captureLast') {
+      const seconds = clamp(command.seconds ?? recorderState.rollingSeconds, 1, recorderState.rollingSeconds) ?? recorderState.rollingSeconds;
+      captureRecorderWindow(seconds, typeof command.mode === 'string' ? command.mode : 'agent');
+    } else if (commandType === 'setRecordingWindow') {
+      const seconds = clamp(command.seconds, 10, 120);
+      if (seconds !== undefined) requestRecorderWindow(seconds);
+    } else if (commandType === 'play') {
+      const target = typeof command.value === 'boolean' ? command.value : true;
+      if (target !== isPlaying) togglePlay();
+    } else if (commandType === 'togglePlay') {
+      togglePlay();
+    } else if (commandType === 'kick') {
+      kickGeneration();
+    } else if (commandType === 'loadRecipe') {
+      applyRecipePatch(command.patch ?? command.recipe);
+    }
+
+    appendAgentEvent('out', { handled: commandType || 'unknown' });
+    window.setTimeout(sendPrompts, 0);
+  }, [
+    addBankPrompt,
+    allBankItems,
+    appendAgentEvent,
+    applyMacro,
+    applyRecipePatch,
+    bankLabel,
+    bankPromptPatch,
+    bankSets,
+    captureRecorderWindow,
+    cleanConfabulator,
+    handleRvqManualChange,
+    handleTextChange,
+    isPlaying,
+    joltConfabulator,
+    kickGeneration,
+    randomizeConfabulator,
+    randomizeDamage,
+    recorderState.recording,
+    recorderState.rollingSeconds,
+    requestRecorderWindow,
+    selectedBallId,
+    sendPrompts,
+    setBankControlsToItem,
+    setPerformanceKey,
+    setTextLabKey,
+    togglePlay,
+    toggleRetroRecorder,
+  ]);
+
+  useEffect(() => {
+    if (!agentCommand) return;
+    executeAgentCommand(agentCommand);
+  }, [agentCommand, executeAgentCommand]);
+
   // ─── Render ────────────────────────────────────────────────────────
   const pcaValues = [
     paramsState.pca_coeff_0,
@@ -2288,6 +2655,19 @@ function App() {
       <div className="confabulator-title">
         <b>CONFABULATOR</b>
         <span>MAGENTA RT</span>
+      </div>
+
+      <div
+        className={agentStatus.enabled ? 'confabulator-agent-badge is-live' : 'confabulator-agent-badge'}
+        title="Local agent performance socket"
+      >
+        <b>AGENT</b>
+        <span>
+          {agentStatus.enabled
+            ? `${agentStatus.host ?? '127.0.0.1'}:${agentStatus.port ?? 47873}`
+            : 'OFF'}
+        </span>
+        {agentStatus.lastCommand && <em>{agentStatus.lastCommand}</em>}
       </div>
 
       {/* Audio Meter — left edge, vertical, centered */}
