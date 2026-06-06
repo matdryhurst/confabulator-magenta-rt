@@ -719,6 +719,7 @@ function App() {
   const [recorderState, setRecorderState] = useState<RecorderState>(DEFAULT_RECORDER_STATE);
   const [agentStatus, setAgentStatus] = useState<AgentStatus>({});
   const [agentCommand, setAgentCommand] = useState<any>(null);
+  const [agentCommandPulse, setAgentCommandPulse] = useState(0);
   const [performanceState, setPerformanceState] = useState<PerformanceState>(DEFAULT_PERFORMANCE_STATE);
   const [textLabState, setTextLabState] = useState<TextLabState>(DEFAULT_TEXT_LAB_STATE);
   const [textLabStatus, setTextLabStatus] = useState<TextLabStatus>('RAW');
@@ -1047,6 +1048,8 @@ function App() {
   const rvqPedalBaseRef = useRef<RvqValues | null>(null);
   const recipeInputRef = useRef<HTMLInputElement>(null);
   const agentEventsRef = useRef<AgentEvent[]>([]);
+  const agentCommandQueueRef = useRef<any[]>([]);
+  const remoteModelsRequestedRef = useRef(false);
 
   const appendAgentEvent = useCallback((direction: AgentEvent['direction'], payload: unknown) => {
     const event: AgentEvent = {
@@ -1193,14 +1196,17 @@ function App() {
         setAgentStatus(previous => ({ ...previous, ...state.agent }));
       }
       if (state.agentCommand !== undefined) {
+        const queuedCommand = {
+          ...state.agentCommand,
+          __receivedAt: Date.now(),
+        };
         setAgentStatus(previous => ({
           ...previous,
           lastCommand: typeof state.agentCommand.type === 'string' ? state.agentCommand.type : 'command',
         }));
-        setAgentCommand({
-          ...state.agentCommand,
-          __receivedAt: Date.now(),
-        });
+        setAgentCommand(queuedCommand);
+        agentCommandQueueRef.current.push(queuedCommand);
+        setAgentCommandPulse(pulse => pulse + 1);
       }
       if (state.params !== undefined) {
         setParamsState(p => {
@@ -1348,7 +1354,10 @@ function App() {
     };
 
     post({ type: 'uiReady' });
-    post({ type: 'listRemoteModels' });
+    if (!remoteModelsRequestedRef.current) {
+      remoteModelsRequestedRef.current = true;
+      post({ type: 'listRemoteModels' });
+    }
 
     return () => {
       delete (window as any).updateState;
@@ -2544,7 +2553,6 @@ function App() {
     }
 
     appendAgentEvent('out', { handled: commandType || 'unknown' });
-    window.setTimeout(sendPrompts, 0);
   }, [
     addBankPrompt,
     allBankItems,
@@ -2567,7 +2575,6 @@ function App() {
     recorderState.rollingSeconds,
     requestRecorderWindow,
     selectedBallId,
-    sendPrompts,
     setBankControlsToItem,
     setPerformanceKey,
     setTextLabKey,
@@ -2576,9 +2583,10 @@ function App() {
   ]);
 
   useEffect(() => {
-    if (!agentCommand) return;
-    executeAgentCommand(agentCommand);
-  }, [agentCommand, executeAgentCommand]);
+    if (agentCommandQueueRef.current.length === 0) return;
+    const commands = agentCommandQueueRef.current.splice(0);
+    commands.forEach((command) => executeAgentCommand(command));
+  }, [agentCommandPulse, executeAgentCommand]);
 
   // ─── Render ────────────────────────────────────────────────────────
   const pcaValues = [

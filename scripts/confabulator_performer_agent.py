@@ -469,7 +469,7 @@ class ConfabulatorPerformer:
             elif self.mode == "duet" and audio["onset"] > 0.18:
                 self.send({"type": "jolt"})
 
-    def run(self, *, take_seconds: float | None, record: bool, start_playing: bool, recording_window: int) -> None:
+    def run(self, *, take_seconds: float | None, record: bool, start_playing: bool, recording_window: int) -> str:
         self.rescue_kick_enabled = start_playing
         if not self.wait_for_state():
             print("warning: connected, but no state arrived yet", file=sys.stderr)
@@ -484,11 +484,12 @@ class ConfabulatorPerformer:
         while self.feed.connected:
             now = time.monotonic()
             if deadline and now >= deadline:
-                break
+                return "complete"
             self.place_prompts(now)
             self.set_controls(now)
             self.maybe_major_gesture(now)
             time.sleep(self.interval)
+        return "disconnected"
 
 
 def reader(sock: socket.socket, feed: SharedFeed, raw: bool) -> None:
@@ -524,39 +525,72 @@ def main() -> int:
     parser.add_argument("--seed", type=int, help="Seed for reproducible gesture choices.")
     parser.add_argument("--raw", action="store_true", help="Print every incoming JSON message.")
     parser.add_argument("--verbose", action="store_true", help="Print outgoing non-position commands.")
+    parser.add_argument("--no-reconnect", action="store_true", help="Exit instead of reconnecting if the socket drops.")
     args = parser.parse_args()
 
     if args.seed is not None:
         random.seed(args.seed)
 
-    feed = SharedFeed()
+    deadline = time.monotonic() + args.take if args.take else None
+    should_continue = True
+    started_recording = False
+
+    def connect_once() -> tuple[socket.socket, SharedFeed, ConfabulatorPerformer]:
+        sock = socket.create_connection((args.host, args.port), timeout=5.0)
+        feed = SharedFeed()
+        print(f"connected to CONFABULATOR at {args.host}:{args.port}", file=sys.stderr)
+        threading.Thread(target=reader, args=(sock, feed, args.raw), daemon=True).start()
+        performer = ConfabulatorPerformer(
+            sock,
+            feed,
+            mode=args.mode,
+            intensity=args.intensity,
+            interval=args.interval,
+            embedding_every=args.embedding_every,
+            allow_drums=args.allow_drums,
+            verbose=args.verbose,
+        )
+        return sock, feed, performer
+
     try:
-        with socket.create_connection((args.host, args.port), timeout=5.0) as sock:
-            print(f"connected to CONFABULATOR at {args.host}:{args.port}", file=sys.stderr)
-            thread = threading.Thread(target=reader, args=(sock, feed, args.raw), daemon=True)
-            thread.start()
-            performer = ConfabulatorPerformer(
-                sock,
-                feed,
-                mode=args.mode,
-                intensity=args.intensity,
-                interval=args.interval,
-                embedding_every=args.embedding_every,
-                allow_drums=args.allow_drums,
-                verbose=args.verbose,
-            )
-            try:
-                performer.run(
-                    take_seconds=args.take,
-                    record=args.record,
-                    start_playing=not args.no_start,
-                    recording_window=args.recording_window,
-                )
-            except KeyboardInterrupt:
-                print("\nstopping performer", file=sys.stderr)
-            finally:
-                if args.record:
-                    performer.send({"type": "recordStop"})
+        while should_continue:
+            remaining = max(0.0, deadline - time.monotonic()) if deadline else None
+            if deadline and remaining <= 0:
+                break
+            sock, _feed, performer = connect_once()
+            with sock:
+                try:
+                    outcome = performer.run(
+                        take_seconds=remaining,
+                        record=args.record,
+                        start_playing=not args.no_start,
+                        recording_window=args.recording_window,
+                    )
+                    started_recording = started_recording or args.record
+                except KeyboardInterrupt:
+                    print("\nstopping performer", file=sys.stderr)
+                    should_continue = False
+                    break
+            if outcome == "complete":
+                break
+            if args.no_reconnect:
+                print("socket disconnected; exiting because --no-reconnect was set", file=sys.stderr)
+                break
+            print("socket disconnected; reconnecting in 1 second", file=sys.stderr)
+            time.sleep(1.0)
+
+        if started_recording:
+            for attempt in range(4):
+                try:
+                    sock, _feed, performer = connect_once()
+                    with sock:
+                        time.sleep(0.25)
+                        performer.send({"type": "recordStop"})
+                    break
+                except OSError:
+                    if attempt == 3:
+                        raise
+                    time.sleep(1.0)
     except ConnectionRefusedError:
         print("Could not connect. Open CONFABULATOR first, then run this script again.", file=sys.stderr)
         return 2

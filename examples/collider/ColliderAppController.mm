@@ -422,6 +422,7 @@ static bool confabWriteFloat32Wav(NSString* path,
 - (NSDictionary*)currentAudioFeatureState;
 - (void)publishAgentPerformanceStateWithAudio:(NSDictionary*)audioFeatures
                                       metrics:(NSDictionary*)metrics;
+- (void)setTransportPlaying:(BOOL)playing reset:(BOOL)reset;
 @end
 
 @implementation ColliderAppController {
@@ -644,6 +645,19 @@ static bool confabWriteFloat32Wav(NSString* path,
 - (void)sendPlayState:(BOOL)playing {
     _isPlaying = playing;
     [self sendStateUpdate:@{@"isPlaying": @(playing)}];
+}
+
+- (void)setTransportPlaying:(BOOL)playing reset:(BOOL)reset {
+    if (!self.engine) return;
+    if (playing == _isPlaying) {
+        [self sendPlayState:_isPlaying];
+        return;
+    }
+    self.engine->set_bypass(!playing);
+    if (playing && reset) {
+        self.engine->trigger_reset();
+    }
+    [self sendPlayState:playing];
 }
 
 - (NSDictionary*)currentFxState {
@@ -1389,7 +1403,7 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
         }
     }
     else if ([type isEqualToString:@"togglePlay"]) {
-        [NSApp sendAction:@selector(menuTogglePlayStop:) to:nil from:self];
+        [self setTransportPlaying:!_isPlaying reset:YES];
     }
     else if ([type isEqualToString:@"openSettings"]) {
         [NSApp sendAction:@selector(menuShowSettings:) to:nil from:self];
