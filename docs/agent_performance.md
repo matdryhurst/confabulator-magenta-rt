@@ -193,6 +193,53 @@ The audio is still written by CONFABULATOR's normal recorder into:
 ~/Music/CONFABULATOR Captures
 ```
 
+## Replaying A Trace
+
+An agent trace can be treated like a score or DAW automation lane. It is not
+sample-perfect audio recall; it is timed re-performance of the same gestures
+into the live model. Because the model is generative, each replay can render
+slightly differently while preserving the same command structure.
+
+Summarize a recipe:
+
+```bash
+python3 scripts/confabulator_replay_agent_trace.py \
+  "$HOME/Music/CONFABULATOR Captures/CONFABULATOR_20260607_015656_retro.confab.json" \
+  --summary
+```
+
+Dry-run the first few events:
+
+```bash
+python3 scripts/confabulator_replay_agent_trace.py path/to/take.confab.json \
+  --dry-run --max-events 20
+```
+
+Replay into a running CONFABULATOR:
+
+```bash
+python3 scripts/confabulator_replay_agent_trace.py path/to/take.confab.json
+```
+
+Replay and record a fresh rendering:
+
+```bash
+python3 scripts/confabulator_replay_agent_trace.py path/to/take.confab.json --record
+```
+
+Useful replay controls:
+
+```text
+--speed 2.0             Replay twice as fast.
+--start-at 120          Start from original trace time 120s.
+--end-at 240            Stop at original trace time 240s.
+--include-recorder      Also replay original recordStart/recordStop/capture commands.
+--no-start              Do not send play/kick before replay.
+```
+
+Older recipes created before the full-trace change may contain only the tail of
+the performance. New recipes keep the complete agent event history for the take.
+
 ## Design Notes
 
 The socket is intentionally simple. Large language models can make high-level

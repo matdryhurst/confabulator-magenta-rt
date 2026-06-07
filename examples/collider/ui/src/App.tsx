@@ -1058,7 +1058,7 @@ function App() {
       direction,
       payload,
     };
-    agentEventsRef.current = [...agentEventsRef.current, event].slice(-2000);
+    agentEventsRef.current = [...agentEventsRef.current, event];
   }, []);
 
   // ─── Bridge: send prompts + weights to native ──────────────────────
