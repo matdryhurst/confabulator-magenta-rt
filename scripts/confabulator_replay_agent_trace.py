@@ -44,6 +44,27 @@ def clean_payload(payload: Any) -> dict[str, Any] | None:
     return cleaned
 
 
+def latest_recording_window(events: list[dict[str, Any]]) -> tuple[float, float] | None:
+    starts: list[float] = []
+    windows: list[tuple[float, float]] = []
+    for event in events:
+        if event.get("direction") != "in":
+            continue
+        t = event.get("t")
+        payload = event.get("payload")
+        if not isinstance(t, (int, float)) or not isinstance(payload, dict):
+            continue
+        kind = payload.get("type")
+        if kind == "recordStart":
+            starts.append(float(t))
+        elif kind == "recordStop" and starts:
+            start = starts.pop()
+            end = float(t)
+            if end > start:
+                windows.append((start, end))
+    return windows[-1] if windows else None
+
+
 def replayable_events(
     events: list[dict[str, Any]],
     *,
@@ -113,6 +134,7 @@ def main() -> int:
     parser.add_argument("--speed", type=float, default=1.0, help="Playback speed. 2.0 is twice as fast.")
     parser.add_argument("--start-at", type=float, help="Original trace time to start at, in seconds.")
     parser.add_argument("--end-at", type=float, help="Original trace time to stop at, in seconds.")
+    parser.add_argument("--latest-recording", action="store_true", help="Replay only the latest recordStart -> recordStop window.")
     parser.add_argument("--max-events", type=int, help="Replay only the first N selected events.")
     parser.add_argument("--summary", action="store_true", help="Print a summary and exit.")
     parser.add_argument("--dry-run", action="store_true", help="Print the timed commands without sending them.")
@@ -125,11 +147,20 @@ def main() -> int:
         raise SystemExit("--speed must be greater than zero")
 
     recipe = load_recipe(args.recipe.expanduser())
+    events = agent_events(recipe)
+    start_at = args.start_at
+    end_at = args.end_at
+    if args.latest_recording:
+        window = latest_recording_window(events)
+        if not window:
+            raise SystemExit("No recordStart -> recordStop window found in this recipe.")
+        start_at = window[0] if start_at is None else max(start_at, window[0])
+        end_at = window[1] if end_at is None else min(end_at, window[1])
     replay = replayable_events(
-        agent_events(recipe),
+        events,
         include_recorder=args.include_recorder,
-        start_at=args.start_at,
-        end_at=args.end_at,
+        start_at=start_at,
+        end_at=end_at,
     )
     if args.max_events is not None:
         replay = replay[: max(0, args.max_events)]
@@ -153,7 +184,7 @@ def main() -> int:
             send(sock, {"type": "play", "value": True, "source": "confabulator_trace_replay"})
             send(sock, {"type": "kick", "source": "confabulator_trace_replay"})
         if args.record:
-            send(sock, {"type": "recordStart", "source": "confabulator_trace_replay"})
+            send(sock, {"type": "recordStart", "seconds": 0, "source": "confabulator_trace_replay"})
 
     try:
         for index, (event_t, payload) in enumerate(replay, start=1):

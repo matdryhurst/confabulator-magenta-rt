@@ -2081,7 +2081,7 @@ function App() {
     });
   }, [buildPatchSnapshot]);
 
-  const toggleRetroRecorder = useCallback(() => {
+  const toggleRetroRecorder = useCallback((seedSeconds?: number) => {
     if (recorderState.recording) {
       setRecorderState(previous => ({ ...previous, status: 'saving', error: undefined }));
       post({
@@ -2090,13 +2090,16 @@ function App() {
       });
       return;
     }
-    setRecorderState(previous => ({ ...previous, recording: true, recordingSeconds: previous.availableSeconds, status: 'recording' }));
+    const seconds = typeof seedSeconds === 'number' && Number.isFinite(seedSeconds)
+      ? Math.max(0, Math.min(recorderState.maxLiveSeconds || 600, seedSeconds))
+      : recorderState.rollingSeconds;
+    setRecorderState(previous => ({ ...previous, recording: true, recordingSeconds: seconds, status: 'recording' }));
     post({
       type: 'recorderStart',
-      seconds: recorderState.rollingSeconds,
+      seconds,
       patch: toMessageSafeObject(buildPatchSnapshot('retro-start')),
     });
-  }, [buildPatchSnapshot, recorderState.availableSeconds, recorderState.recording, recorderState.rollingSeconds]);
+  }, [buildPatchSnapshot, recorderState.maxLiveSeconds, recorderState.recording, recorderState.rollingSeconds]);
 
   const applyRecipePatch = useCallback((patch: any) => {
     if (!patch || typeof patch !== 'object') return;
@@ -2532,7 +2535,10 @@ function App() {
         applyMacro(name);
       }
     } else if (commandType === 'recordStart') {
-      if (!recorderState.recording) toggleRetroRecorder();
+      if (!recorderState.recording) {
+        const seedSeconds = Number(command.seconds);
+        toggleRetroRecorder(Number.isFinite(seedSeconds) ? seedSeconds : undefined);
+      }
     } else if (commandType === 'recordStop') {
       if (recorderState.recording) toggleRetroRecorder();
     } else if (commandType === 'captureLast') {
@@ -2736,7 +2742,7 @@ function App() {
             <button
               type="button"
               className={recorderState.recording ? 'is-hot' : undefined}
-              onClick={toggleRetroRecorder}
+              onClick={() => toggleRetroRecorder()}
             >
               {recorderState.recording ? 'STOP' : 'REC'}
             </button>

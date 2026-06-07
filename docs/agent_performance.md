@@ -271,6 +271,7 @@ Useful replay controls:
 
 ```text
 --speed 2.0             Replay twice as fast.
+--latest-recording      Replay only the latest recordStart -> recordStop window.
 --start-at 120          Start from original trace time 120s.
 --end-at 240            Stop at original trace time 240s.
 --include-recorder      Also replay original recordStart/recordStop/capture commands.

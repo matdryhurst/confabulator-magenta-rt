@@ -313,7 +313,7 @@ class ConfabulatorPerformer:
         self.place_prompts(time.monotonic(), force=True)
         self.set_controls(time.monotonic(), force=True)
         if record:
-            self.send({"type": "recordStart"})
+            self.send({"type": "recordStart", "seconds": 0})
 
     def set_initial_embeddings(self) -> None:
         picked = self.choose_embeddings(3)
