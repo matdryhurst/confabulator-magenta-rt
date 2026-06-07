@@ -45,7 +45,8 @@ def clean_payload(payload: Any) -> dict[str, Any] | None:
 
 
 def latest_recording_window(events: list[dict[str, Any]]) -> tuple[float, float] | None:
-    starts: list[float] = []
+    starts_by_source: dict[str, list[float]] = {}
+    fallback_starts: list[float] = []
     windows: list[tuple[float, float]] = []
     for event in events:
         if event.get("direction") != "in":
@@ -55,10 +56,18 @@ def latest_recording_window(events: list[dict[str, Any]]) -> tuple[float, float]
         if not isinstance(t, (int, float)) or not isinstance(payload, dict):
             continue
         kind = payload.get("type")
+        source = str(payload.get("source", ""))
         if kind == "recordStart":
-            starts.append(float(t))
-        elif kind == "recordStop" and starts:
-            start = starts.pop()
+            starts_by_source.setdefault(source, []).append(float(t))
+            fallback_starts.append(float(t))
+        elif kind == "recordStop":
+            starts = starts_by_source.get(source, [])
+            if starts:
+                start = starts.pop()
+            elif fallback_starts:
+                start = fallback_starts.pop()
+            else:
+                continue
             end = float(t)
             if end > start:
                 windows.append((start, end))
