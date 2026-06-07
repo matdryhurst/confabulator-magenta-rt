@@ -16,6 +16,7 @@ import socket
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -44,6 +45,18 @@ MODE_WORDS = {
     "xray": ("raw", "glass", "dense", "pulse", "bow", "metal", "harmonic", "scrape"),
     "noise": ("raw", "dense", "metal", "bright", "pulse", "scrape", "crush", "rough"),
     "duet": ("bow", "glass", "tone", "pulse", "string", "harmonic", "bright", "slow"),
+}
+
+TARGETS = ("none", "fractal", "filigree", "void", "knife", "organism", "maze")
+
+TARGET_DESCRIPTIONS = {
+    "none": "no extra target; use the selected performance mode",
+    "fractal": "chase multi-scale spectral complexity without collapsing into plain hiss",
+    "filigree": "seek bright, dense, high-detail upper texture",
+    "void": "seek sparse, hollow, low-energy negative space",
+    "knife": "seek sharp transients and cut-up spectral edges",
+    "organism": "seek slow self-similar mutation with a living internal pulse",
+    "maze": "seek bounded unpredictability, changing direction before it settles",
 }
 
 
@@ -100,6 +113,7 @@ class ConfabulatorPerformer:
         feed: SharedFeed,
         *,
         mode: str,
+        target: str,
         intensity: float,
         interval: float,
         embedding_every: float,
@@ -109,6 +123,7 @@ class ConfabulatorPerformer:
         self.sock = sock
         self.feed = feed
         self.mode = mode
+        self.target = target
         self.intensity = clamp(intensity)
         self.interval = max(0.08, interval)
         self.embedding_every = max(8.0, embedding_every)
@@ -122,6 +137,8 @@ class ConfabulatorPerformer:
         self.send_lock = threading.Lock()
         self.sent = 0
         self.rescue_kick_enabled = True
+        self.audio_history: deque[dict[str, float]] = deque(maxlen=180)
+        self.target_scores: dict[str, float] = {}
 
     def send(self, payload: dict[str, Any]) -> None:
         payload.setdefault("source", "confabulator_performer_agent")
@@ -191,6 +208,19 @@ class ConfabulatorPerformer:
             score += density * 0.35 + (1.0 - rhythm) * 0.25
         else:
             score += abs(0.55 - brightness) * -0.3 + (1.0 - rhythm) * 0.25
+
+        if self.target == "fractal":
+            score += density * 0.35 + brightness * 0.22 + (1.0 - abs(0.45 - rhythm)) * 0.18
+        elif self.target == "filigree":
+            score += brightness * 0.55 + density * 0.25
+        elif self.target == "void":
+            score += (1.0 - rhythm) * 0.45 + (1.0 - density) * 0.22 + (1.0 - brightness) * 0.18
+        elif self.target == "knife":
+            score += brightness * 0.42 + rhythm * 0.28 + density * 0.18
+        elif self.target == "organism":
+            score += (1.0 - abs(0.48 - rhythm)) * 0.32 + (1.0 - abs(0.55 - density)) * 0.28
+        elif self.target == "maze":
+            score += density * 0.34 + (1.0 - abs(0.6 - brightness)) * 0.22 + rhythm * 0.14
         return score + random.random() * 0.65
 
     def choose_embeddings(self, count: int = 3) -> list[str]:
@@ -254,6 +284,245 @@ class ConfabulatorPerformer:
             "zcr": fnum(audio.get("zeroCrossingRate")),
         }
 
+    def remember_audio(self, now: float, audio: dict[str, float]) -> None:
+        self.audio_history.append({
+            "t": now,
+            "rms": clamp(audio["rms"] * 8.0),
+            "brightness": clamp(audio["brightness"]),
+            "roughness": clamp(audio["roughness"]),
+            "onset": clamp(audio["onset"]),
+            "zcr": clamp(audio["zcr"] * 12.0),
+        })
+
+    def history_values(self, key: str, horizon: float | None = None) -> list[float]:
+        if not self.audio_history:
+            return []
+        latest = self.audio_history[-1]["t"]
+        return [
+            item[key]
+            for item in self.audio_history
+            if horizon is None or latest - item["t"] <= horizon
+        ]
+
+    @staticmethod
+    def mean(values: list[float]) -> float:
+        return sum(values) / len(values) if values else 0.0
+
+    @classmethod
+    def std(cls, values: list[float]) -> float:
+        if len(values) < 2:
+            return 0.0
+        avg = cls.mean(values)
+        return math.sqrt(sum((value - avg) ** 2 for value in values) / len(values))
+
+    @staticmethod
+    def mean_delta(values: list[float]) -> float:
+        if len(values) < 2:
+            return 0.0
+        return sum(abs(values[index] - values[index - 1]) for index in range(1, len(values))) / (len(values) - 1)
+
+    def audio_targets(self) -> dict[str, float]:
+        if len(self.audio_history) < 4:
+            return {
+                "energy": 0.0,
+                "brightness": 0.0,
+                "roughness": 0.0,
+                "transient": 0.0,
+                "complexity": 0.0,
+                "stability": 0.0,
+                "void": 0.0,
+            }
+
+        bright_short = self.history_values("brightness", 4.0)
+        bright_long = self.history_values("brightness", 22.0)
+        rough_short = self.history_values("roughness", 4.0)
+        rough_long = self.history_values("roughness", 22.0)
+        onset_short = self.history_values("onset", 4.0)
+        onset_long = self.history_values("onset", 22.0)
+        zcr_short = self.history_values("zcr", 4.0)
+        energy_short = self.history_values("rms", 4.0)
+        energy_long = self.history_values("rms", 22.0)
+
+        micro_motion = (
+            self.mean_delta(bright_short)
+            + self.mean_delta(rough_short)
+            + self.mean_delta(zcr_short)
+        ) / 3.0
+        macro_motion = (
+            self.std(bright_long)
+            + self.std(rough_long)
+            + self.std(onset_long)
+        ) / 3.0
+        brightness = self.mean(bright_short)
+        roughness = self.mean(rough_short)
+        transient = self.mean(onset_short)
+        energy = self.mean(energy_short)
+        low_energy = 1.0 - self.mean(energy_long)
+
+        # A compact proxy for "interesting spectrogram": changing at fast and
+        # slow rates, bright/rough enough to have features, but not just maxed.
+        whiteness_penalty = max(0.0, brightness - 0.86) * 0.45 + max(0.0, energy - 0.88) * 0.35
+        complexity = clamp((micro_motion * 3.1 + macro_motion * 2.4 + roughness * 0.28 + transient * 0.18) - whiteness_penalty)
+        stability = clamp(1.0 - (micro_motion * 3.0 + self.std(energy_long) * 1.6))
+        void = clamp(low_energy * 0.8 + (1.0 - transient) * 0.2)
+
+        return {
+            "energy": clamp(energy),
+            "brightness": clamp(brightness),
+            "roughness": clamp(roughness),
+            "transient": clamp(transient),
+            "complexity": complexity,
+            "stability": stability,
+            "void": void,
+        }
+
+    def target_pressure(self, name: str, score: float) -> float:
+        if self.target != name:
+            return 0.0
+        return clamp(1.0 - score)
+
+    @staticmethod
+    def add_values(values: dict[str, float], additions: dict[str, float]) -> None:
+        for key, amount in additions.items():
+            values[key] = values.get(key, 0.0) + amount
+
+    def apply_target_controls(
+        self,
+        rvq: dict[str, float],
+        damage: dict[str, float],
+        text_lab: dict[str, float],
+        *,
+        slow: float,
+        wobble: float,
+    ) -> None:
+        scores = self.audio_targets()
+        self.target_scores = scores
+        if self.target == "none":
+            return
+
+        intensity = self.intensity
+        fractal = self.target_pressure("fractal", scores["complexity"])
+        filigree = self.target_pressure("filigree", (scores["brightness"] + scores["roughness"]) * 0.5)
+        void = self.target_pressure("void", scores["void"])
+        knife = self.target_pressure("knife", (scores["transient"] + scores["brightness"]) * 0.5)
+        organism = self.target_pressure("organism", (scores["stability"] + scores["complexity"] * 0.65) * 0.5)
+        maze = self.target_pressure("maze", (scores["complexity"] * 0.7 + (1.0 - scores["stability"]) * 0.3))
+
+        if fractal:
+            self.add_values(rvq, {
+                "rvqForce": 0.10 * fractal,
+                "rvqSweep": (0.20 + slow * 0.16) * fractal,
+                "rvqStride": (0.18 + wobble * 0.18) * fractal,
+                "rvqJitter": 0.14 * fractal,
+                "rvqFine": 0.13 * fractal,
+                "rvqMemory": 0.10 * fractal,
+            })
+            self.add_values(damage, {
+                "comb": 0.18 * fractal,
+                "harmonics": 0.16 * fractal,
+                "ring": 0.07 * fractal,
+                "noise": -0.05 * fractal,
+            })
+            self.add_values(text_lab, {
+                "scan": 0.18 * fractal,
+                "morph": 0.14 * fractal,
+                "warp": 0.08 * fractal,
+            })
+
+        if filigree:
+            self.add_values(rvq, {
+                "rvqFine": 0.24 * filigree,
+                "rvqJitter": 0.12 * filigree,
+                "rvqCoarse": -0.06 * filigree,
+                "rvqHold": -0.04 * filigree,
+            })
+            self.add_values(damage, {
+                "harmonics": 0.24 * filigree,
+                "ring": 0.15 * filigree,
+                "comb": 0.08 * filigree,
+                "body": -0.08 * filigree,
+                "noise": -0.04 * filigree,
+            })
+            self.add_values(text_lab, {"scan": 0.20 * filigree, "scramble": 0.06 * filigree})
+
+        if void:
+            self.add_values(rvq, {
+                "rvqForce": -0.08 * void,
+                "rvqMemory": 0.26 * void,
+                "rvqHold": 0.22 * void,
+                "rvqBreathe": 0.18 * void,
+                "rvqCoarse": 0.09 * void,
+                "rvqFine": -0.06 * void,
+            })
+            self.add_values(damage, {
+                "body": 0.28 * void,
+                "smear": 0.18 * void,
+                "comb": 0.12 * void,
+                "drive": -0.08 * void,
+                "crush": -0.08 * void,
+                "noise": -0.08 * void,
+            })
+            self.add_values(text_lab, {"gravity": 0.18 * void, "scramble": -0.05 * void})
+
+        if knife:
+            self.add_values(rvq, {
+                "rvqForce": 0.16 * knife,
+                "rvqCoarse": 0.10 * knife,
+                "rvqFine": 0.12 * knife,
+                "rvqJitter": 0.18 * knife,
+                "rvqHold": -0.08 * knife,
+                "rvqMemory": -0.06 * knife,
+            })
+            self.add_values(damage, {
+                "fold": 0.18 * knife,
+                "ring": 0.22 * knife,
+                "stutter": 0.18 * knife,
+                "smear": -0.06 * knife,
+                "harmonics": 0.14 * knife,
+                "noise": -0.03 * knife,
+            })
+            self.add_values(text_lab, {"scramble": 0.12 * knife, "scan": 0.12 * knife})
+
+        if organism:
+            pulse = (math.sin((time.monotonic() - self.start_time) * (0.11 + intensity * 0.04)) + 1.0) * 0.5
+            self.add_values(rvq, {
+                "rvqBreathe": (0.24 + pulse * 0.16) * organism,
+                "rvqMemory": 0.24 * organism,
+                "rvqSweep": 0.10 * organism,
+                "rvqJitter": 0.06 * organism,
+                "rvqStride": 0.08 * organism,
+            })
+            self.add_values(damage, {
+                "comb": 0.12 * organism,
+                "smear": 0.12 * organism,
+                "harmonics": 0.10 * organism,
+                "noise": -0.06 * organism,
+            })
+            self.add_values(text_lab, {"morph": 0.20 * organism, "gravity": 0.12 * organism})
+
+        if maze:
+            turn = 1.0 if int((time.monotonic() - self.start_time) / 5.0) % 2 == 0 else -1.0
+            self.add_values(rvq, {
+                "rvqForce": 0.10 * maze,
+                "rvqSweep": (0.24 if turn > 0 else -0.05) * maze,
+                "rvqInvert": (0.18 if turn > 0 else 0.06) * maze,
+                "rvqStride": (0.22 if turn < 0 else 0.08) * maze,
+                "rvqJitter": 0.15 * maze,
+                "rvqMemory": -0.04 * maze,
+            })
+            self.add_values(damage, {
+                "fold": 0.12 * maze,
+                "comb": 0.16 * maze,
+                "stutter": 0.10 * maze,
+                "pitch": 0.08 * maze,
+                "noise": -0.04 * maze,
+            })
+            self.add_values(text_lab, {
+                "warp": 0.14 * maze,
+                "oppose": 0.12 * maze,
+                "scan": 0.12 * maze,
+            })
+
     def surface(self) -> dict[str, Any]:
         state, _ = self.feed.snapshot()
         ui = state.get("ui", {}) if isinstance(state, dict) else {}
@@ -299,6 +568,7 @@ class ConfabulatorPerformer:
 
     def set_controls(self, now: float, *, force: bool = False) -> None:
         audio = self.current_audio()
+        self.remember_audio(now, audio)
         energy = clamp(audio["rms"] * 7.0)
         bright = clamp(audio["brightness"])
         rough = clamp(audio["roughness"])
@@ -424,25 +694,31 @@ class ConfabulatorPerformer:
             damage["crush"] *= 0.45
             damage["noise"] = 0.0
 
+        text_lab = {
+            "warp": 0.08 + intensity * 0.22 + slow * 0.10,
+            "scramble": 0.02 + (rough if self.mode == "noise" else onset) * 0.18,
+            "morph": 0.16 + slow * 0.32,
+            "oppose": 0.02 + wobble * 0.16,
+            "scan": 0.08 + bright * 0.24,
+            "gravity": 0.15 + (1.0 - energy) * 0.30,
+        }
+        self.apply_target_controls(rvq, damage, text_lab, slow=slow, wobble=wobble)
+
         self.send({"type": "setRvq", "values": {key: round(clamp(value), 3) for key, value in rvq.items()}})
         self.send({"type": "setDamage", "values": {key: round(clamp(value), 3) for key, value in damage.items()}})
         self.send({
             "type": "setTextLab",
-            "values": {
-                "warp": round(clamp(0.08 + intensity * 0.22 + slow * 0.10), 3),
-                "scramble": round(clamp(0.02 + (rough if self.mode == "noise" else onset) * 0.18), 3),
-                "morph": round(clamp(0.16 + slow * 0.32), 3),
-                "oppose": round(clamp(0.02 + wobble * 0.16), 3),
-                "scan": round(clamp(0.08 + bright * 0.24), 3),
-                "gravity": round(clamp(0.15 + (1.0 - energy) * 0.30), 3),
-            },
+            "values": {key: round(clamp(value), 3) for key, value in text_lab.items()},
         })
 
         if now - self.last_log > 4.0:
             self.last_log = now
+            target_note = ""
+            if self.target != "none" and self.target_scores:
+                target_note = f" target={self.target} complexity={self.target_scores['complexity']:.2f}"
             print(
                 f"{self.mode} rms={audio['rms']:.3f} peak={audio['peak']:.2f} "
-                f"bright={bright:.2f} rough={rough:.2f} sent={self.sent}",
+                f"bright={bright:.2f} rough={rough:.2f}{target_note} sent={self.sent}",
                 file=sys.stderr,
             )
 
@@ -477,7 +753,7 @@ class ConfabulatorPerformer:
             print("warning: no embedding catalog received yet; performing with current prompts", file=sys.stderr)
         self.bootstrap(start_playing=start_playing, record=record, recording_window=recording_window)
         print(
-            f"performing mode={self.mode} intensity={self.intensity:.2f}; press Ctrl-C to stop",
+            f"performing mode={self.mode} target={self.target} intensity={self.intensity:.2f}; press Ctrl-C to stop",
             file=sys.stderr,
         )
         deadline = time.monotonic() + take_seconds if take_seconds else None
@@ -514,6 +790,13 @@ def main() -> int:
     parser.add_argument("--host", default=HOST)
     parser.add_argument("--port", type=int, default=PORT)
     parser.add_argument("--mode", choices=("xray", "drift", "duet", "noise"), default="xray")
+    parser.add_argument(
+        "--target",
+        choices=TARGETS,
+        default="none",
+        help="Unusual listening objective. Try fractal, filigree, void, knife, organism, or maze.",
+    )
+    parser.add_argument("--list-targets", action="store_true", help="Print target descriptions and exit.")
     parser.add_argument("--intensity", type=float, default=0.55, help="0.0 gentle, 1.0 aggressive.")
     parser.add_argument("--interval", type=float, default=0.65, help="Seconds between gesture updates.")
     parser.add_argument("--embedding-every", type=float, default=32.0, help="Seconds between embedding changes.")
@@ -527,6 +810,11 @@ def main() -> int:
     parser.add_argument("--verbose", action="store_true", help="Print outgoing non-position commands.")
     parser.add_argument("--no-reconnect", action="store_true", help="Exit instead of reconnecting if the socket drops.")
     args = parser.parse_args()
+
+    if args.list_targets:
+        for name in TARGETS:
+            print(f"{name:9} {TARGET_DESCRIPTIONS[name]}")
+        return 0
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -544,6 +832,7 @@ def main() -> int:
             sock,
             feed,
             mode=args.mode,
+            target=args.target,
             intensity=args.intensity,
             interval=args.interval,
             embedding_every=args.embedding_every,

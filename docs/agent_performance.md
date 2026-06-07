@@ -174,11 +174,30 @@ Useful options:
 
 ```text
 --intensity 0.0-1.0       How hard the agent pushes the instrument.
+--target fractal          Aim for an unusual listening target.
+--list-targets            Show the available target descriptions.
 --embedding-every 45      Seconds between embedding changes.
 --no-start                Do not send play/kick when connecting.
 --allow-drums             Allow percussion/drum embeddings.
 --seed 123                Repeat the same broad gesture choices.
 ```
+
+Targets are extra objectives layered on top of the performance mode. They use
+the audio features the app actually sends to the agent: energy, brightness,
+roughness, onset, and zero-crossing behavior. For example:
+
+```bash
+python3 scripts/confabulator_performer_agent.py --mode xray --target fractal
+python3 scripts/confabulator_performer_agent.py --mode drift --target organism
+python3 scripts/confabulator_performer_agent.py --mode noise --target knife --intensity 0.75
+python3 scripts/confabulator_performer_agent.py --mode xray --target void --record
+```
+
+`fractal` tries to create multi-scale spectral complexity without turning into
+plain hiss. `filigree` chases bright high-detail texture. `void` looks for
+sparse hollow negative space. `knife` seeks sharp transient edges. `organism`
+tries to keep slow self-similar mutation alive. `maze` keeps changing direction
+before the sound settles.
 
 ## Recording Agent Performances
 
