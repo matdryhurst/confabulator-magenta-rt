@@ -47,7 +47,20 @@ MODE_WORDS = {
     "duet": ("bow", "glass", "tone", "pulse", "string", "harmonic", "bright", "slow"),
 }
 
-TARGETS = ("none", "fractal", "filigree", "void", "knife", "organism", "maze")
+TARGETS = (
+    "none",
+    "fractal",
+    "filigree",
+    "void",
+    "knife",
+    "organism",
+    "maze",
+    "seam",
+    "argument",
+    "haunt",
+    "swarm",
+    "palimpsest",
+)
 
 TARGET_DESCRIPTIONS = {
     "none": "no extra target; use the selected performance mode",
@@ -57,6 +70,11 @@ TARGET_DESCRIPTIONS = {
     "knife": "seek sharp transients and cut-up spectral edges",
     "organism": "seek slow self-similar mutation with a living internal pulse",
     "maze": "seek bounded unpredictability, changing direction before it settles",
+    "seam": "play the 2-second inference boundary as a musical pulse",
+    "argument": "keep the listener, prompts, text space, and codec controls in disagreement",
+    "haunt": "return to half-remembered states while letting the model mutate underneath",
+    "swarm": "maintain many tiny unstable changes without collapsing into one center",
+    "palimpsest": "overwrite the current identity in translucent layers instead of clean jumps",
 }
 
 
@@ -221,6 +239,16 @@ class ConfabulatorPerformer:
             score += (1.0 - abs(0.48 - rhythm)) * 0.32 + (1.0 - abs(0.55 - density)) * 0.28
         elif self.target == "maze":
             score += density * 0.34 + (1.0 - abs(0.6 - brightness)) * 0.22 + rhythm * 0.14
+        elif self.target == "seam":
+            score += density * 0.24 + (1.0 - abs(0.5 - brightness)) * 0.22 + rhythm * 0.18
+        elif self.target == "argument":
+            score += density * 0.28 + brightness * 0.20 + abs(0.5 - rhythm) * 0.22
+        elif self.target == "haunt":
+            score += (1.0 - rhythm) * 0.38 + (1.0 - brightness) * 0.20 + (1.0 - abs(0.45 - density)) * 0.16
+        elif self.target == "swarm":
+            score += density * 0.42 + brightness * 0.24 + rhythm * 0.20
+        elif self.target == "palimpsest":
+            score += (1.0 - abs(0.55 - density)) * 0.30 + (1.0 - abs(0.38 - rhythm)) * 0.24
         return score + random.random() * 0.65
 
     def choose_embeddings(self, count: int = 3) -> list[str]:
@@ -321,6 +349,12 @@ class ConfabulatorPerformer:
             return 0.0
         return sum(abs(values[index] - values[index - 1]) for index in range(1, len(values))) / (len(values) - 1)
 
+    @staticmethod
+    def seam_pulse(elapsed: float, width: float = 0.18) -> float:
+        phase = elapsed % 2.0
+        distance = min(phase, 2.0 - phase)
+        return clamp(1.0 - distance / max(0.01, width))
+
     def audio_targets(self) -> dict[str, float]:
         if len(self.audio_history) < 4:
             return {
@@ -407,6 +441,12 @@ class ConfabulatorPerformer:
         knife = self.target_pressure("knife", (scores["transient"] + scores["brightness"]) * 0.5)
         organism = self.target_pressure("organism", (scores["stability"] + scores["complexity"] * 0.65) * 0.5)
         maze = self.target_pressure("maze", (scores["complexity"] * 0.7 + (1.0 - scores["stability"]) * 0.3))
+        elapsed = time.monotonic() - self.start_time
+        seam = self.target_pressure("seam", scores["complexity"] * 0.45 + scores["transient"] * 0.35)
+        argument = self.target_pressure("argument", (1.0 - scores["stability"]) * 0.55 + scores["complexity"] * 0.25)
+        haunt = self.target_pressure("haunt", scores["stability"] * 0.45 + scores["void"] * 0.35)
+        swarm = self.target_pressure("swarm", scores["complexity"] * 0.55 + scores["transient"] * 0.25)
+        palimpsest = self.target_pressure("palimpsest", scores["stability"] * 0.35 + scores["complexity"] * 0.35)
 
         if fractal:
             self.add_values(rvq, {
@@ -523,6 +563,127 @@ class ConfabulatorPerformer:
                 "scan": 0.12 * maze,
             })
 
+        if seam:
+            pulse = self.seam_pulse(elapsed)
+            pre_echo = self.seam_pulse(elapsed + 0.18, width=0.24) * 0.55
+            seam_amount = seam * max(pulse, pre_echo)
+            self.add_values(rvq, {
+                "rvqForce": 0.08 * seam + 0.24 * seam_amount,
+                "rvqCoarse": 0.20 * seam_amount,
+                "rvqFine": -0.04 * seam + 0.08 * pulse,
+                "rvqHold": 0.18 * pre_echo,
+                "rvqInvert": 0.18 * seam_amount,
+                "rvqStride": 0.22 * seam_amount,
+                "rvqMemory": -0.08 * seam_amount,
+            })
+            self.add_values(damage, {
+                "stutter": 0.30 * seam_amount,
+                "comb": 0.18 * seam,
+                "pitch": 0.10 * seam_amount,
+                "ring": 0.12 * pulse,
+                "noise": -0.06 * seam,
+            })
+            self.add_values(text_lab, {
+                "oppose": 0.20 * seam_amount,
+                "scan": 0.14 * seam,
+                "scramble": 0.10 * seam_amount,
+            })
+
+        if argument:
+            self.add_values(rvq, {
+                "rvqForce": 0.12 * argument,
+                "rvqCoarse": 0.16 * argument,
+                "rvqFine": 0.18 * argument,
+                "rvqInvert": 0.28 * argument,
+                "rvqJitter": 0.16 * argument,
+                "rvqMemory": -0.12 * argument,
+                "rvqHold": -0.08 * argument,
+            })
+            self.add_values(damage, {
+                "fold": 0.16 * argument,
+                "ring": 0.18 * argument,
+                "pitch": 0.14 * argument,
+                "comb": 0.10 * argument,
+                "noise": -0.05 * argument,
+            })
+            self.add_values(text_lab, {
+                "oppose": 0.38 * argument,
+                "scramble": 0.16 * argument,
+                "warp": 0.16 * argument,
+                "gravity": -0.08 * argument,
+            })
+
+        if haunt:
+            ghost = (math.sin(elapsed * 0.17) + 1.0) * 0.5
+            self.add_values(rvq, {
+                "rvqBreathe": (0.22 + ghost * 0.12) * haunt,
+                "rvqMemory": 0.34 * haunt,
+                "rvqHold": 0.24 * haunt,
+                "rvqSweep": 0.08 * haunt,
+                "rvqFine": -0.04 * haunt,
+                "rvqJitter": 0.05 * haunt,
+            })
+            self.add_values(damage, {
+                "smear": 0.22 * haunt,
+                "body": 0.18 * haunt,
+                "comb": 0.16 * haunt,
+                "harmonics": 0.08 * haunt,
+                "noise": -0.08 * haunt,
+            })
+            self.add_values(text_lab, {
+                "morph": 0.24 * haunt,
+                "gravity": 0.16 * haunt,
+                "warp": 0.08 * haunt,
+            })
+
+        if swarm:
+            swarm_lfo = (math.sin(elapsed * 1.73) + 1.0) * 0.5
+            self.add_values(rvq, {
+                "rvqForce": 0.12 * swarm,
+                "rvqFine": 0.24 * swarm,
+                "rvqJitter": (0.20 + swarm_lfo * 0.10) * swarm,
+                "rvqStride": 0.20 * swarm,
+                "rvqSweep": 0.16 * swarm,
+                "rvqCoarse": -0.05 * swarm,
+                "rvqHold": -0.07 * swarm,
+            })
+            self.add_values(damage, {
+                "harmonics": 0.20 * swarm,
+                "ring": 0.16 * swarm,
+                "stutter": 0.12 * swarm,
+                "comb": 0.08 * swarm,
+                "noise": -0.04 * swarm,
+            })
+            self.add_values(text_lab, {
+                "scan": 0.24 * swarm,
+                "scramble": 0.16 * swarm,
+                "morph": 0.08 * swarm,
+            })
+
+        if palimpsest:
+            layer = (math.sin(elapsed * 0.09) + 1.0) * 0.5
+            self.add_values(rvq, {
+                "rvqMemory": 0.30 * palimpsest,
+                "rvqHold": 0.18 * palimpsest,
+                "rvqSweep": (0.14 + layer * 0.12) * palimpsest,
+                "rvqBreathe": 0.12 * palimpsest,
+                "rvqFine": 0.08 * palimpsest,
+                "rvqInvert": 0.08 * palimpsest,
+            })
+            self.add_values(damage, {
+                "smear": 0.20 * palimpsest,
+                "comb": 0.18 * palimpsest,
+                "body": 0.10 * palimpsest,
+                "pitch": 0.08 * palimpsest,
+                "noise": -0.07 * palimpsest,
+            })
+            self.add_values(text_lab, {
+                "morph": 0.28 * palimpsest,
+                "warp": 0.16 * palimpsest,
+                "oppose": 0.10 * palimpsest,
+                "gravity": 0.08 * palimpsest,
+            })
+
     def surface(self) -> dict[str, Any]:
         state, _ = self.feed.snapshot()
         ui = state.get("ui", {}) if isinstance(state, dict) else {}
@@ -552,8 +713,39 @@ class ConfabulatorPerformer:
         if self.mode == "noise":
             radius_x *= 1.18
             radius_y *= 1.25
+        if self.target == "argument":
+            speed *= 1.42
+            radius_x *= 1.22
+            radius_y *= 1.30
+        elif self.target == "haunt":
+            speed *= 0.58
+            radius_x *= 0.70
+            radius_y *= 0.78
+        elif self.target == "swarm":
+            speed *= 1.85
+            radius_x *= 0.82
+            radius_y *= 0.88
+        elif self.target == "palimpsest":
+            speed *= 0.72
+            radius_x *= 0.94
+            radius_y *= 0.92
         listener_x = clamp(620.0 + math.cos(elapsed * speed) * radius_x * 0.36, 80.0, 1120.0)
         listener_y = clamp(225.0 + math.sin(elapsed * speed * 0.73) * radius_y * 0.45, 55.0, 430.0)
+        if self.target == "seam":
+            pulse = self.seam_pulse(elapsed)
+            listener_x += math.sin(elapsed * math.pi) * 115.0 * pulse
+            listener_y += math.cos(elapsed * math.pi * 0.5) * 55.0 * pulse
+        elif self.target == "argument":
+            listener_x = clamp(620.0 - math.cos(elapsed * speed * 0.91) * radius_x * 0.46, 80.0, 1120.0)
+            listener_y = clamp(225.0 - math.sin(elapsed * speed * 1.11) * radius_y * 0.55, 55.0, 430.0)
+        elif self.target == "swarm":
+            listener_x += math.sin(elapsed * 2.9) * 32.0 * self.intensity
+            listener_y += math.cos(elapsed * 2.3) * 22.0 * self.intensity
+        elif self.target == "palimpsest":
+            listener_x = listener_x * 0.84 + lx * 0.16
+            listener_y = listener_y * 0.84 + ly * 0.16
+        listener_x = clamp(listener_x, 80.0, 1120.0)
+        listener_y = clamp(listener_y, 55.0, 430.0)
         self.send({"type": "moveListener", "x": round(listener_x, 2), "y": round(listener_y, 2)})
 
         ids = self.prompt_ids()
@@ -562,8 +754,22 @@ class ConfabulatorPerformer:
         for index, prompt_id in enumerate(ids[:3]):
             angle = elapsed * speed * (0.55 + index * 0.11) + index * math.tau / 3.0
             wobble = math.sin(elapsed * 0.19 + index) * 34.0 * self.intensity
+            if self.target == "argument":
+                angle += math.pi * (1 if index % 2 == 0 else -1)
+                wobble += math.sin(elapsed * 0.83 + index * 1.7) * 38.0 * self.intensity
+            elif self.target == "haunt":
+                wobble *= 0.38
+            elif self.target == "swarm":
+                wobble += math.sin(elapsed * (1.7 + index * 0.33)) * 44.0 * self.intensity
+            elif self.target == "palimpsest":
+                angle += math.sin(elapsed * 0.07 + index) * 0.55
+            elif self.target == "seam":
+                wobble += self.seam_pulse(elapsed + index * 0.12) * 58.0 * self.intensity
             x = clamp(lx + math.cos(angle) * (radius_x + wobble), 50.0, 1190.0)
             y = clamp(ly + math.sin(angle * 1.17) * (radius_y + wobble * 0.35), 45.0, 455.0)
+            if self.target == "palimpsest":
+                x = x * 0.78 + (lx + (index - 1) * 72.0) * 0.22
+                y = y * 0.78 + (ly + math.sin(elapsed * 0.11 + index) * 42.0) * 0.22
             self.send({"type": "movePrompt", "promptId": prompt_id, "x": round(x, 2), "y": round(y, 2)})
 
     def set_controls(self, now: float, *, force: bool = False) -> None:
@@ -729,7 +935,13 @@ class ConfabulatorPerformer:
             self.send({"type": "play", "value": True})
             self.send({"type": "kick"})
 
-        if now - self.last_embedding_change > self.embedding_every:
+        embedding_interval = self.embedding_every
+        if self.target in {"argument", "swarm", "seam"}:
+            embedding_interval *= 0.72
+        elif self.target in {"haunt", "palimpsest"}:
+            embedding_interval *= 1.35
+
+        if now - self.last_embedding_change > embedding_interval:
             picked = self.choose_embeddings(3)
             if picked:
                 self.last_embedding_change = now
@@ -744,6 +956,22 @@ class ConfabulatorPerformer:
                 self.send({"type": "macro", "name": random.choice(["metal", "ghost"])})
             elif self.mode == "duet" and audio["onset"] > 0.18:
                 self.send({"type": "jolt"})
+
+            if self.target == "seam":
+                self.send({"type": "macro", "name": random.choice(["shred", "ghost"])})
+            elif self.target == "argument":
+                self.send({"type": "setPerformance", "values": {
+                    "drift": round(random.uniform(0.58, 0.90), 3),
+                    "snapback": round(random.uniform(0.08, 0.42), 3),
+                }})
+                if random.random() < 0.55:
+                    self.send({"type": "jolt"})
+            elif self.target == "haunt":
+                self.send({"type": "macro", "name": "ghost"})
+            elif self.target == "swarm":
+                self.send({"type": "macro", "name": random.choice(["metal", "shred"])})
+            elif self.target == "palimpsest":
+                self.send({"type": "macro", "name": random.choice(["melt", "ghost"])})
 
     def run(self, *, take_seconds: float | None, record: bool, start_playing: bool, recording_window: int) -> str:
         self.rescue_kick_enabled = start_playing
@@ -794,7 +1022,7 @@ def main() -> int:
         "--target",
         choices=TARGETS,
         default="none",
-        help="Unusual listening objective. Try fractal, filigree, void, knife, organism, or maze.",
+        help="Unusual listening objective. Use --list-targets to see the full set.",
     )
     parser.add_argument("--list-targets", action="store_true", help="Print target descriptions and exit.")
     parser.add_argument("--intensity", type=float, default=0.55, help="0.0 gentle, 1.0 aggressive.")

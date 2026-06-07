@@ -191,13 +191,22 @@ python3 scripts/confabulator_performer_agent.py --mode xray --target fractal
 python3 scripts/confabulator_performer_agent.py --mode drift --target organism
 python3 scripts/confabulator_performer_agent.py --mode noise --target knife --intensity 0.75
 python3 scripts/confabulator_performer_agent.py --mode xray --target void --record
+python3 scripts/confabulator_performer_agent.py --mode xray --target seam
+python3 scripts/confabulator_performer_agent.py --mode duet --target argument
+python3 scripts/confabulator_performer_agent.py --mode drift --target haunt
+python3 scripts/confabulator_performer_agent.py --mode xray --target swarm --intensity 0.65
+python3 scripts/confabulator_performer_agent.py --mode drift --target palimpsest --record
 ```
 
 `fractal` tries to create multi-scale spectral complexity without turning into
 plain hiss. `filigree` chases bright high-detail texture. `void` looks for
 sparse hollow negative space. `knife` seeks sharp transient edges. `organism`
 tries to keep slow self-similar mutation alive. `maze` keeps changing direction
-before the sound settles.
+before the sound settles. `seam` plays the model's 2-second inference boundary
+as a pulse. `argument` keeps the prompt surface, listener, text space, and RVQ
+stack in productive disagreement. `haunt` keeps returning to half-remembered
+states. `swarm` keeps tiny instabilities moving everywhere at once.
+`palimpsest` overwrites the current identity in translucent layers.
 
 ## Recording Agent Performances
 
