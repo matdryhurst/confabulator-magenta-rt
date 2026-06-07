@@ -196,6 +196,11 @@ python3 scripts/confabulator_performer_agent.py --mode duet --target argument
 python3 scripts/confabulator_performer_agent.py --mode drift --target haunt
 python3 scripts/confabulator_performer_agent.py --mode xray --target swarm --intensity 0.65
 python3 scripts/confabulator_performer_agent.py --mode drift --target palimpsest --record
+python3 scripts/confabulator_performer_agent.py --mode xray --target mandala
+python3 scripts/confabulator_performer_agent.py --mode drift --target eigen
+python3 scripts/confabulator_performer_agent.py --mode duet --target apophenia
+python3 scripts/confabulator_performer_agent.py --mode xray --target hilbert --intensity 0.7
+python3 scripts/confabulator_performer_agent.py --mode drift --target sigil --record
 ```
 
 `fractal` tries to create multi-scale spectral complexity without turning into
@@ -207,6 +212,13 @@ as a pulse. `argument` keeps the prompt surface, listener, text space, and RVQ
 stack in productive disagreement. `haunt` keeps returning to half-remembered
 states. `swarm` keeps tiny instabilities moving everywhere at once.
 `palimpsest` overwrites the current identity in translucent layers.
+`mandala` searches for symmetry across prompt geometry, RVQ/control mirrors,
+and rolling audio complexity. `eigen` searches for a self-similar attractor:
+the sound returning to itself, but changed. `apophenia` forces coincidences
+between unrelated audio features, positions, and parameter ratios. `hilbert`
+walks the prompt surface like a recursive space-filling curve. `sigil` hashes
+the current prompt labels into modulation patterns, so the instructions become
+a control spell rather than only a semantic request.
 
 ## Recording Agent Performances
 

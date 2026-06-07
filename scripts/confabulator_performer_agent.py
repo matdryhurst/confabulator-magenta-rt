@@ -9,6 +9,7 @@ gestures back to the instrument.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import random
@@ -60,6 +61,11 @@ TARGETS = (
     "haunt",
     "swarm",
     "palimpsest",
+    "mandala",
+    "eigen",
+    "apophenia",
+    "hilbert",
+    "sigil",
 )
 
 TARGET_DESCRIPTIONS = {
@@ -75,6 +81,11 @@ TARGET_DESCRIPTIONS = {
     "haunt": "return to half-remembered states while letting the model mutate underneath",
     "swarm": "maintain many tiny unstable changes without collapsing into one center",
     "palimpsest": "overwrite the current identity in translucent layers instead of clean jumps",
+    "mandala": "seek symmetry across prompt geometry, control mirrors, and rolling audio complexity",
+    "eigen": "search for a self-similar audio/control attractor that keeps returning changed",
+    "apophenia": "force coincidences between unrelated audio features, positions, and parameter ratios",
+    "hilbert": "walk the prompt surface as a recursive space-filling control path",
+    "sigil": "hash the current prompt instructions into occult-looking modulation patterns",
 }
 
 
@@ -249,6 +260,17 @@ class ConfabulatorPerformer:
             score += density * 0.42 + brightness * 0.24 + rhythm * 0.20
         elif self.target == "palimpsest":
             score += (1.0 - abs(0.55 - density)) * 0.30 + (1.0 - abs(0.38 - rhythm)) * 0.24
+        elif self.target == "mandala":
+            score += (1.0 - abs(0.5 - brightness)) * 0.34 + (1.0 - abs(0.5 - density)) * 0.34 + (1.0 - abs(0.5 - rhythm)) * 0.18
+        elif self.target == "eigen":
+            score += (1.0 - rhythm) * 0.28 + (1.0 - abs(0.58 - density)) * 0.26 + (1.0 - abs(0.42 - brightness)) * 0.20
+        elif self.target == "apophenia":
+            score += abs(brightness - rhythm) * 0.28 + abs(density - brightness) * 0.24 + density * 0.16
+        elif self.target == "hilbert":
+            score += density * 0.25 + (1.0 - abs(0.62 - rhythm)) * 0.32 + brightness * 0.14
+        elif self.target == "sigil":
+            sigil = self.prompt_hash()
+            score += (1.0 - abs(sigil - brightness)) * 0.26 + (1.0 - abs((1.0 - sigil) - density)) * 0.26 + rhythm * 0.12
         return score + random.random() * 0.65
 
     def choose_embeddings(self, count: int = 3) -> list[str]:
@@ -355,6 +377,70 @@ class ConfabulatorPerformer:
         distance = min(phase, 2.0 - phase)
         return clamp(1.0 - distance / max(0.01, width))
 
+    @staticmethod
+    def hilbert_xy(index: int, order: int = 4) -> tuple[float, float]:
+        n = 1 << order
+        x = 0
+        y = 0
+        t = index % (n * n)
+        s = 1
+        while s < n:
+            rx = 1 & (t // 2)
+            ry = 1 & (t ^ rx)
+            if ry == 0:
+                if rx == 1:
+                    x = s - 1 - x
+                    y = s - 1 - y
+                x, y = y, x
+            x += s * rx
+            y += s * ry
+            t //= 4
+            s *= 2
+        scale = max(1, n - 1)
+        return x / scale, y / scale
+
+    def prompt_hash(self) -> float:
+        prompts = self.surface().get("prompts", [])
+        text = "|".join(
+            str(prompt.get("label", ""))
+            for prompt in prompts
+            if isinstance(prompt, dict)
+        )
+        if not text:
+            text = self.mode + "|" + self.target
+        digest = hashlib.sha256(text.encode("utf-8")).digest()
+        return int.from_bytes(digest[:8], "big") / float(2**64 - 1)
+
+    def surface_symmetry(self) -> dict[str, float]:
+        surface = self.surface()
+        listener = surface.get("listener", {}) if isinstance(surface, dict) else {}
+        lx = fnum(listener.get("x"), 620.0)
+        ly = fnum(listener.get("y"), 225.0)
+        prompts = [
+            prompt
+            for prompt in surface.get("prompts", [])
+            if isinstance(prompt, dict)
+        ] if isinstance(surface, dict) else []
+        if len(prompts) < 2:
+            return {"symmetry": 0.0, "balance": 0.0, "spread": 0.0}
+
+        distances = [
+            math.hypot(fnum(prompt.get("x"), lx) - lx, fnum(prompt.get("y"), ly) - ly)
+            for prompt in prompts
+        ]
+        weights = [clamp(fnum(prompt.get("weight"))) for prompt in prompts]
+        distance_mean = self.mean(distances)
+        distance_spread = self.std(distances) / max(1.0, distance_mean)
+        weight_sum = sum(weights)
+        if weight_sum <= 0:
+            balance = 0.0
+        else:
+            entropy = -sum((weight / weight_sum) * math.log(max(1e-6, weight / weight_sum)) for weight in weights)
+            balance = clamp(entropy / math.log(max(2, len(weights))))
+        spread = clamp(distance_mean / 460.0)
+        symmetry = clamp((1.0 - distance_spread) * 0.58 + balance * 0.42)
+        return {"symmetry": symmetry, "balance": balance, "spread": spread}
+
     def audio_targets(self) -> dict[str, float]:
         if len(self.audio_history) < 4:
             return {
@@ -364,6 +450,7 @@ class ConfabulatorPerformer:
                 "transient": 0.0,
                 "complexity": 0.0,
                 "stability": 0.0,
+                "selfsimilar": 0.0,
                 "void": 0.0,
             }
 
@@ -398,6 +485,12 @@ class ConfabulatorPerformer:
         whiteness_penalty = max(0.0, brightness - 0.86) * 0.45 + max(0.0, energy - 0.88) * 0.35
         complexity = clamp((micro_motion * 3.1 + macro_motion * 2.4 + roughness * 0.28 + transient * 0.18) - whiteness_penalty)
         stability = clamp(1.0 - (micro_motion * 3.0 + self.std(energy_long) * 1.6))
+        selfsimilar = clamp(1.0 - (
+            abs(self.mean(bright_short) - self.mean(bright_long))
+            + abs(self.mean(rough_short) - self.mean(rough_long))
+            + abs(self.mean(onset_short) - self.mean(onset_long))
+            + abs(self.mean(energy_short) - self.mean(energy_long))
+        ) * 1.35)
         void = clamp(low_energy * 0.8 + (1.0 - transient) * 0.2)
 
         return {
@@ -407,6 +500,7 @@ class ConfabulatorPerformer:
             "transient": clamp(transient),
             "complexity": complexity,
             "stability": stability,
+            "selfsimilar": selfsimilar,
             "void": void,
         }
 
@@ -447,6 +541,20 @@ class ConfabulatorPerformer:
         haunt = self.target_pressure("haunt", scores["stability"] * 0.45 + scores["void"] * 0.35)
         swarm = self.target_pressure("swarm", scores["complexity"] * 0.55 + scores["transient"] * 0.25)
         palimpsest = self.target_pressure("palimpsest", scores["stability"] * 0.35 + scores["complexity"] * 0.35)
+        surface = self.surface_symmetry()
+        sigil_value = self.prompt_hash()
+        mandala_score = scores["complexity"] * 0.32 + surface["symmetry"] * 0.38 + scores["selfsimilar"] * 0.30
+        eigen_score = scores["selfsimilar"] * 0.48 + scores["complexity"] * 0.28 + scores["stability"] * 0.24
+        coincidence = 1.0 - (
+            abs(scores["brightness"] - surface["balance"])
+            + abs(scores["roughness"] - sigil_value)
+            + abs(scores["transient"] - surface["spread"])
+        ) / 3.0
+        mandala = self.target_pressure("mandala", mandala_score)
+        eigen = self.target_pressure("eigen", eigen_score)
+        apophenia = self.target_pressure("apophenia", coincidence)
+        hilbert = self.target_pressure("hilbert", scores["complexity"] * 0.38 + surface["spread"] * 0.32 + scores["transient"] * 0.18)
+        sigil = self.target_pressure("sigil", coincidence * 0.42 + scores["selfsimilar"] * 0.25 + scores["complexity"] * 0.18)
 
         if fractal:
             self.add_values(rvq, {
@@ -684,6 +792,137 @@ class ConfabulatorPerformer:
                 "gravity": 0.08 * palimpsest,
             })
 
+        if mandala:
+            phi = 0.61803398875
+            mirror = 1.0 - abs(phi - surface["balance"])
+            self.add_values(rvq, {
+                "rvqForce": 0.10 * mandala,
+                "rvqBreathe": 0.22 * mandala,
+                "rvqMemory": 0.20 * mandala,
+                "rvqCoarse": (0.18 + mirror * 0.06) * mandala,
+                "rvqFine": (0.18 + surface["symmetry"] * 0.08) * mandala,
+                "rvqSweep": (0.12 + phi * 0.16) * mandala,
+                "rvqStride": (0.12 + (1.0 - phi) * 0.16) * mandala,
+                "rvqInvert": 0.10 * mandala,
+            })
+            self.add_values(damage, {
+                "comb": 0.18 * mandala,
+                "harmonics": 0.18 * mandala,
+                "ring": 0.10 * mandala,
+                "smear": 0.08 * mandala,
+                "noise": -0.06 * mandala,
+            })
+            self.add_values(text_lab, {
+                "morph": 0.20 * mandala,
+                "scan": 0.16 * mandala,
+                "gravity": 0.12 * mandala,
+                "oppose": 0.08 * mandala,
+            })
+
+        if eigen:
+            recurrence = (math.sin(elapsed * 0.314) + math.sin(elapsed * 0.157 + 1.1) + 2.0) * 0.25
+            self.add_values(rvq, {
+                "rvqForce": 0.08 * eigen,
+                "rvqBreathe": (0.24 + recurrence * 0.16) * eigen,
+                "rvqMemory": 0.36 * eigen,
+                "rvqHold": 0.24 * eigen,
+                "rvqSweep": (0.10 + recurrence * 0.12) * eigen,
+                "rvqJitter": 0.06 * eigen,
+                "rvqStride": 0.08 * eigen,
+            })
+            self.add_values(damage, {
+                "comb": 0.18 * eigen,
+                "body": 0.12 * eigen,
+                "smear": 0.16 * eigen,
+                "harmonics": 0.08 * eigen,
+                "noise": -0.08 * eigen,
+            })
+            self.add_values(text_lab, {
+                "morph": 0.22 * eigen,
+                "gravity": 0.16 * eigen,
+                "warp": 0.08 * eigen,
+            })
+
+        if apophenia:
+            ratio_a = abs(scores["brightness"] - surface["balance"])
+            ratio_b = abs(scores["roughness"] - sigil_value)
+            ratio_c = abs(scores["transient"] - surface["spread"])
+            self.add_values(rvq, {
+                "rvqForce": (0.08 + ratio_a * 0.18) * apophenia,
+                "rvqCoarse": ratio_b * 0.24 * apophenia,
+                "rvqFine": ratio_c * 0.28 * apophenia,
+                "rvqInvert": (0.10 + sigil_value * 0.18) * apophenia,
+                "rvqJitter": 0.20 * apophenia,
+                "rvqStride": (0.08 + surface["spread"] * 0.22) * apophenia,
+                "rvqMemory": -0.06 * apophenia,
+            })
+            self.add_values(damage, {
+                "fold": 0.14 * apophenia,
+                "ring": (0.08 + ratio_b * 0.20) * apophenia,
+                "comb": (0.08 + ratio_a * 0.16) * apophenia,
+                "pitch": 0.12 * apophenia,
+                "stutter": 0.10 * apophenia,
+                "noise": -0.04 * apophenia,
+            })
+            self.add_values(text_lab, {
+                "oppose": 0.18 * apophenia,
+                "scramble": 0.20 * apophenia,
+                "scan": 0.14 * apophenia,
+            })
+
+        if hilbert:
+            step = int((elapsed * (1.4 + self.intensity * 1.8)) % 256)
+            hx, hy = self.hilbert_xy(step)
+            self.add_values(rvq, {
+                "rvqForce": (0.08 + hx * 0.18) * hilbert,
+                "rvqCoarse": hx * 0.22 * hilbert,
+                "rvqFine": hy * 0.24 * hilbert,
+                "rvqSweep": (0.10 + abs(hx - hy) * 0.22) * hilbert,
+                "rvqStride": (0.08 + max(hx, hy) * 0.24) * hilbert,
+                "rvqInvert": (0.04 + min(hx, hy) * 0.18) * hilbert,
+                "rvqJitter": 0.12 * hilbert,
+            })
+            self.add_values(damage, {
+                "comb": (0.08 + hx * 0.18) * hilbert,
+                "harmonics": (0.08 + hy * 0.18) * hilbert,
+                "stutter": 0.12 * hilbert,
+                "pitch": abs(hx - hy) * 0.18 * hilbert,
+                "noise": -0.05 * hilbert,
+            })
+            self.add_values(text_lab, {
+                "scan": (0.12 + hx * 0.16) * hilbert,
+                "warp": (0.08 + hy * 0.16) * hilbert,
+                "oppose": abs(hx - hy) * 0.18 * hilbert,
+            })
+
+        if sigil:
+            sigil_phase = elapsed * (0.11 + sigil_value * 0.27)
+            rune = (math.sin(sigil_phase) + math.sin(sigil_phase * 2.618 + 0.7) + 2.0) * 0.25
+            inverse = 1.0 - sigil_value
+            self.add_values(rvq, {
+                "rvqForce": (0.08 + rune * 0.14) * sigil,
+                "rvqBreathe": (0.10 + inverse * 0.18) * sigil,
+                "rvqMemory": (0.12 + sigil_value * 0.22) * sigil,
+                "rvqCoarse": sigil_value * 0.18 * sigil,
+                "rvqFine": inverse * 0.20 * sigil,
+                "rvqInvert": rune * 0.18 * sigil,
+                "rvqJitter": (0.06 + abs(rune - sigil_value) * 0.18) * sigil,
+            })
+            self.add_values(damage, {
+                "ring": (0.08 + sigil_value * 0.18) * sigil,
+                "comb": (0.08 + inverse * 0.18) * sigil,
+                "fold": rune * 0.14 * sigil,
+                "harmonics": 0.16 * sigil,
+                "smear": 0.08 * sigil,
+                "noise": -0.05 * sigil,
+            })
+            self.add_values(text_lab, {
+                "warp": (0.10 + sigil_value * 0.18) * sigil,
+                "scramble": rune * 0.18 * sigil,
+                "morph": (0.12 + inverse * 0.16) * sigil,
+                "oppose": 0.12 * sigil,
+            })
+
     def surface(self) -> dict[str, Any]:
         state, _ = self.feed.snapshot()
         ui = state.get("ui", {}) if isinstance(state, dict) else {}
@@ -729,6 +968,24 @@ class ConfabulatorPerformer:
             speed *= 0.72
             radius_x *= 0.94
             radius_y *= 0.92
+        elif self.target == "mandala":
+            speed *= 0.64
+            radius_x *= 0.86
+            radius_y *= 0.86
+        elif self.target == "eigen":
+            speed *= 0.52
+            radius_x *= 0.72
+            radius_y *= 0.72
+        elif self.target == "apophenia":
+            speed *= 1.33
+            radius_x *= 1.10
+            radius_y *= 1.18
+        elif self.target == "hilbert":
+            speed *= 0.92
+            radius_x *= 1.02
+            radius_y *= 1.02
+        elif self.target == "sigil":
+            speed *= 0.80 + self.prompt_hash() * 0.72
         listener_x = clamp(620.0 + math.cos(elapsed * speed) * radius_x * 0.36, 80.0, 1120.0)
         listener_y = clamp(225.0 + math.sin(elapsed * speed * 0.73) * radius_y * 0.45, 55.0, 430.0)
         if self.target == "seam":
@@ -744,6 +1001,24 @@ class ConfabulatorPerformer:
         elif self.target == "palimpsest":
             listener_x = listener_x * 0.84 + lx * 0.16
             listener_y = listener_y * 0.84 + ly * 0.16
+        elif self.target == "mandala":
+            listener_x = 620.0 + math.cos(elapsed * speed) * radius_x * 0.18
+            listener_y = 225.0 + math.sin(elapsed * speed) * radius_y * 0.18
+        elif self.target == "eigen":
+            listener_x = listener_x * 0.74 + lx * 0.26
+            listener_y = listener_y * 0.74 + ly * 0.26
+        elif self.target == "apophenia":
+            sigil = self.prompt_hash()
+            listener_x += math.sin(elapsed * (0.7 + sigil)) * 44.0 * self.intensity
+            listener_y += math.cos(elapsed * (1.1 + sigil * 0.7)) * 34.0 * self.intensity
+        elif self.target == "hilbert":
+            hx, hy = self.hilbert_xy(int(elapsed * (1.3 + self.intensity * 1.4)))
+            listener_x = 100.0 + hx * 1040.0
+            listener_y = 65.0 + hy * 360.0
+        elif self.target == "sigil":
+            sigil = self.prompt_hash()
+            listener_x += math.sin(elapsed * (0.29 + sigil * 0.41)) * 72.0 * sigil
+            listener_y += math.cos(elapsed * (0.23 + (1.0 - sigil) * 0.37)) * 58.0 * (1.0 - sigil)
         listener_x = clamp(listener_x, 80.0, 1120.0)
         listener_y = clamp(listener_y, 55.0, 430.0)
         self.send({"type": "moveListener", "x": round(listener_x, 2), "y": round(listener_y, 2)})
@@ -765,11 +1040,36 @@ class ConfabulatorPerformer:
                 angle += math.sin(elapsed * 0.07 + index) * 0.55
             elif self.target == "seam":
                 wobble += self.seam_pulse(elapsed + index * 0.12) * 58.0 * self.intensity
+            elif self.target == "mandala":
+                angle = elapsed * speed + index * math.tau / max(1, min(3, len(ids)))
+                wobble *= 0.22
+            elif self.target == "eigen":
+                angle += math.sin(elapsed * 0.11) * 0.24
+                wobble *= 0.30
+            elif self.target == "apophenia":
+                sigil = self.prompt_hash()
+                wobble += math.sin(elapsed * (0.71 + sigil + index * 0.19)) * 52.0 * self.intensity
+            elif self.target == "hilbert":
+                hx, hy = self.hilbert_xy(int(elapsed * (1.0 + self.intensity) + index * 31))
+                x = clamp(80.0 + hx * 1080.0, 50.0, 1190.0)
+                y = clamp(50.0 + hy * 390.0, 45.0, 455.0)
+                self.send({"type": "movePrompt", "promptId": prompt_id, "x": round(x, 2), "y": round(y, 2)})
+                continue
+            elif self.target == "sigil":
+                sigil = self.prompt_hash()
+                angle += sigil * math.tau * (index + 1)
+                wobble += math.sin(elapsed * (0.37 + sigil) + index) * 46.0 * self.intensity
             x = clamp(lx + math.cos(angle) * (radius_x + wobble), 50.0, 1190.0)
             y = clamp(ly + math.sin(angle * 1.17) * (radius_y + wobble * 0.35), 45.0, 455.0)
             if self.target == "palimpsest":
                 x = x * 0.78 + (lx + (index - 1) * 72.0) * 0.22
                 y = y * 0.78 + (ly + math.sin(elapsed * 0.11 + index) * 42.0) * 0.22
+            elif self.target == "mandala":
+                x = 620.0 + math.cos(angle) * radius_x
+                y = 225.0 + math.sin(angle) * radius_y
+            elif self.target == "eigen":
+                x = x * 0.70 + (lx + math.cos(index * math.tau / 3.0) * radius_x * 0.42) * 0.30
+                y = y * 0.70 + (ly + math.sin(index * math.tau / 3.0) * radius_y * 0.42) * 0.30
             self.send({"type": "movePrompt", "promptId": prompt_id, "x": round(x, 2), "y": round(y, 2)})
 
     def set_controls(self, now: float, *, force: bool = False) -> None:
@@ -936,9 +1236,9 @@ class ConfabulatorPerformer:
             self.send({"type": "kick"})
 
         embedding_interval = self.embedding_every
-        if self.target in {"argument", "swarm", "seam"}:
+        if self.target in {"argument", "swarm", "seam", "apophenia", "hilbert"}:
             embedding_interval *= 0.72
-        elif self.target in {"haunt", "palimpsest"}:
+        elif self.target in {"haunt", "palimpsest", "eigen", "mandala", "sigil"}:
             embedding_interval *= 1.35
 
         if now - self.last_embedding_change > embedding_interval:
@@ -972,6 +1272,24 @@ class ConfabulatorPerformer:
                 self.send({"type": "macro", "name": random.choice(["metal", "shred"])})
             elif self.target == "palimpsest":
                 self.send({"type": "macro", "name": random.choice(["melt", "ghost"])})
+            elif self.target == "mandala":
+                self.send({"type": "setPerformance", "values": {
+                    "drift": round(random.uniform(0.42, 0.68), 3),
+                    "snapback": round(random.uniform(0.28, 0.56), 3),
+                }})
+            elif self.target == "eigen":
+                self.send({"type": "macro", "name": random.choice(["ghost", "melt"])})
+            elif self.target == "apophenia":
+                self.send({"type": "macro", "name": random.choice(["metal", "melt", "shred", "ghost"])})
+                if random.random() < 0.4:
+                    self.send({"type": "jolt"})
+            elif self.target == "hilbert":
+                self.send({"type": "macro", "name": random.choice(["shred", "metal"])})
+            elif self.target == "sigil":
+                self.send({"type": "setPerformance", "values": {
+                    "drift": round(0.25 + self.prompt_hash() * 0.55, 3),
+                    "snapback": round(0.15 + (1.0 - self.prompt_hash()) * 0.55, 3),
+                }})
 
     def run(self, *, take_seconds: float | None, record: bool, start_playing: bool, recording_window: int) -> str:
         self.rescue_kick_enabled = start_playing
